@@ -99,11 +99,14 @@ final class PasswordTests: XCTestCase {
         let passwords = PasswordManager(storage: MemoryPasswordStorage())
 
         let browser = BrowserModel(passwords: passwords)
-        XCTAssertEqual(browser.makeConfiguration().userContentController.userScripts.count, 1)
+        let autofillScripts = { (browser: BrowserModel) in
+            browser.makeConfiguration().userContentController.userScripts.filter { $0.source == PasswordAutofill.script }
+        }
+        XCTAssertEqual(autofillScripts(browser).count, 1)
 
         let privateWindow = BrowserModel.makePrivate(downloads: DownloadManager())
         XCTAssertNil(privateWindow.passwords)
-        XCTAssertTrue(privateWindow.makeConfiguration().userContentController.userScripts.isEmpty)
+        XCTAssertTrue(autofillScripts(privateWindow).isEmpty)
         XCTAssertNil(BrowserModel(websiteDataStore: .nonPersistent(), passwords: passwords).passwords)
     }
 
@@ -172,13 +175,15 @@ final class PasswordTests: XCTestCase {
             "origin": "https://evil.example", "username": "alice", "secret": "secret",
         ], in: nil, contentWorld: PasswordAutofill.world)
         XCTAssertEqual(refused as? Bool, false)
-        XCTAssertEqual(try await webView.evaluateJavaScript(values) as? [String], ["", ""])
+        let untouched = try await webView.evaluateJavaScript(values) as? [String]
+        XCTAssertEqual(untouched, ["", ""])
 
         let filled = try await webView.callAsyncJavaScript(PasswordAutofill.fillScript, arguments: [
             "origin": example.description, "username": "alice", "secret": "secret",
         ], in: nil, contentWorld: PasswordAutofill.world)
         XCTAssertEqual(filled as? Bool, true)
-        XCTAssertEqual(try await webView.evaluateJavaScript(values) as? [String], ["alice", "secret"])
+        let filledValues = try await webView.evaluateJavaScript(values) as? [String]
+        XCTAssertEqual(filledValues, ["alice", "secret"])
     }
 
     func testPageScriptsCantReachTheAutofillHandler() async throws {

@@ -89,6 +89,7 @@ final class HistoryStore {
     @ObservationIgnored private var cachedPages: [HistoryPage]?
     /// Removals made before the saved history finished loading, applied to it once it has.
     @ObservationIgnored private var pendingRemovals: [(HistoryVisit) -> Bool] = []
+    @ObservationIgnored private var isSaving = true
 
     /// Pass `nil` to keep history in memory only.
     init(file: StoreFile? = .applicationSupport(named: "History.plist")) {
@@ -106,6 +107,32 @@ final class HistoryStore {
 
     func waitUntilLoaded() async {
         await loading?.value
+    }
+
+    /// Adds visits from another browser, leaving out those already in history to the second, and returns how many
+    /// were added. Visits older than `maxAge` aren't kept.
+    @discardableResult
+    func importVisits(_ imported: [HistoryVisit], now: Date = .now) async -> Int {
+        await waitUntilLoaded()
+        let key = { (visit: HistoryVisit) in
+            "\(Int(visit.date.timeIntervalSinceReferenceDate)) \(visit.url.absoluteString)"
+        }
+        var known = Set(visits.map(key))
+        let cutoff = now.addingTimeInterval(-Self.maxAge)
+        let added = imported.filter { $0.date >= cutoff && $0.date <= now && known.insert(key($0)).inserted }
+        guard !added.isEmpty else { return 0 }
+        let before = visits.count
+        update { visits in
+            visits = (visits + added).sorted { $0.date < $1.date }
+            Self.prune(&visits, now: now)
+        }
+        return max(0, visits.count - before)
+    }
+
+    /// Stops saving, so a deleted profile's history file isn't written again.
+    func stopSaving() {
+        isSaving = false
+        saveTask?.cancel()
     }
 
     /// Adds a visit, returning its ID so the title can follow the page's.
@@ -222,7 +249,7 @@ final class HistoryStore {
     }
 
     private func scheduleSave() {
-        guard let file else { return }
+        guard let file, isSaving else { return }
         saveTask?.cancel()
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: Self.saveDelay)
@@ -234,7 +261,7 @@ final class HistoryStore {
 
     /// Saves right away, for when the app quits. History that hasn't loaded yet is left as it is.
     func saveNow() {
-        guard let file, loading == nil else { return }
+        guard let file, isSaving, loading == nil else { return }
         saveTask?.cancel()
         file.writeNow(try? PropertyListEncoder.binary.encode(visits))
     }

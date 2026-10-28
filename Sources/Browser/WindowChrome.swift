@@ -34,6 +34,8 @@ enum TabLayout: String, CaseIterable, Identifiable {
     case vertical
 
     static let storageKey = "tabLayout"
+    /// Whether the tab strip or sidebar is hidden, leaving the navigation bar as the window's top row.
+    static let hiddenStorageKey = "tabsHidden"
 
     var id: Self { self }
 

@@ -32,17 +32,19 @@ final class SitePermissions {
         var id: String { site }
     }
 
-    static let shared = SitePermissions(defaults: .standard)
-    private static let storageKey = "sitePermissions"
+    nonisolated static let storageKey = "sitePermissions"
 
     /// `nil` keeps every answer in memory only.
     @ObservationIgnored private let defaults: UserDefaults?
+    @ObservationIgnored private let defaultsKey: String
     private var decisions: [Key: Bool] = [:]
     @ObservationIgnored private var prompts: [String: Task<Bool?, Never>] = [:]
 
-    init(defaults: UserDefaults? = nil) {
+    /// A profile's answers are saved under its key prefix.
+    init(defaults: UserDefaults? = nil, keyPrefix: String = "") {
         self.defaults = defaults
-        let saved = defaults?.dictionary(forKey: Self.storageKey) as? [String: [String: Bool]] ?? [:]
+        defaultsKey = keyPrefix + Self.storageKey
+        let saved = defaults?.dictionary(forKey: defaultsKey) as? [String: [String: Bool]] ?? [:]
         for (site, answers) in saved {
             for (name, isAllowed) in answers {
                 guard let permission = Permission(rawValue: name), permission.isSaved else { continue }
@@ -110,6 +112,6 @@ final class SitePermissions {
         for (key, isAllowed) in decisions where key.permission.isSaved {
             saved[key.site, default: [:]][key.permission.rawValue] = isAllowed
         }
-        defaults.set(saved, forKey: Self.storageKey)
+        defaults.set(saved, forKey: defaultsKey)
     }
 }

@@ -24,6 +24,7 @@ struct TabStrip: View {
     private let maxTabWidth: CGFloat = 220
     private let minTabWidth: CGFloat = 56
     private let newTabButtonSize: CGFloat = 28
+    private let pinnedTabWidth: CGFloat = 40
     /// Always leave some empty strip to drag the window by.
     private let minDragAreaWidth: CGFloat = 40
 
@@ -35,24 +36,77 @@ struct TabStrip: View {
             }
         }
         .task(id: hoveredTabID) { await updateHoverCard() }
+        .task(id: draggedTabID) { await forgetDraggedTabWhenDropped() }
+    }
+
+    /// The tabs with their places in the window, pinned ones first.
+    private var pinnedTabs: [(offset: Int, element: BrowserTab)] {
+        Array(browser.tabs.enumerated().prefix { $0.element.isPinned })
+    }
+
+    private var unpinnedTabs: [(offset: Int, element: BrowserTab)] {
+        Array(browser.tabs.enumerated().dropFirst(browser.pinnedCount))
+    }
+
+    /// Without pinned tabs there's no pinned area to drag a tab into, so one appears while a tab is dragged.
+    private var showsPinDropZone: Bool {
+        browser.pinnedCount == 0 && browser.tab(withID: draggedTabID) != nil
+    }
+
+    /// SwiftUI doesn't say when a drag ends without a drop, so the dragged tab is forgotten once the mouse is up.
+    private func forgetDraggedTabWhenDropped() async {
+        guard draggedTabID != nil else { return }
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(250))
+            if NSEvent.pressedMouseButtons & 1 == 0 {
+                draggedTabID = nil
+                return
+            }
+        }
+    }
+
+    private func pinDropZone(width: CGFloat?, height: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        return Label(width == nil ? "Drop Here to Pin" : "Pin", systemImage: "pin")
+            .labelStyle(PinDropLabelStyle(showsTitle: width == nil))
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(width: width, height: height)
+            .frame(maxWidth: width == nil ? .infinity : nil)
+            .overlay { shape.strokeBorder(Color.primary.opacity(0.2), style: StrokeStyle(lineWidth: 1, dash: [3, 3])) }
+            .contentShape(shape)
+            .onDrop(of: [.text], delegate: PinDropDelegate(browser: browser, draggedTabID: $draggedTabID))
+            .transition(.opacity)
     }
 
     private var horizontalStrip: some View {
         GeometryReader { geometry in
             let leading = isFullScreen ? BrowserChrome.edgeInset
                 : BrowserChrome.windowButtonsTrailing(titlebarHeight: BrowserChrome.tabRowHeight) + 12
-            let count = CGFloat(browser.tabs.count)
+            let pinned = pinnedTabs
+            let unpinned = unpinnedTabs
+            let pinnedAreaWidth = CGFloat(pinned.count) * (pinnedTabWidth + spacing)
+                + (showsPinDropZone ? pinnedTabWidth + spacing : 0)
+            let count = CGFloat(max(unpinned.count, 1))
             let availableWidth = max(minTabWidth, geometry.size.width - leading - BrowserChrome.edgeInset
-                                     - newTabButtonSize - spacing - minDragAreaWidth)
+                                     - newTabButtonSize - spacing - minDragAreaWidth - pinnedAreaWidth)
             let tabWidth = min(maxTabWidth,
                                max(minTabWidth, ((availableWidth - spacing * (count - 1)) / count).rounded(.down)))
-            let tabsWidth = tabWidth * count + spacing * (count - 1)
+            let tabsWidth = unpinned.isEmpty ? 0 : tabWidth * count + spacing * (count - 1)
 
             HStack(spacing: spacing) {
+                // Pinned tabs stay in view while the others scroll.
+                ForEach(pinned, id: \.element.id) { index, tab in
+                    tabItem(for: tab, at: index, width: pinnedTabWidth)
+                }
+                if showsPinDropZone {
+                    pinDropZone(width: pinnedTabWidth, height: BrowserChrome.tabHeight)
+                }
+
                 ScrollViewReader { scrollProxy in
                     ScrollView(.horizontal) {
                         HStack(spacing: spacing) {
-                            ForEach(Array(browser.tabs.enumerated()), id: \.element.id) { index, tab in
+                            ForEach(unpinned, id: \.element.id) { index, tab in
                                 tabItem(for: tab, at: index, width: tabWidth)
                                     .id(tab.id)
                             }
@@ -62,7 +116,7 @@ struct TabStrip: View {
                     .scrollIndicators(.never)
                     .scrollDisabled(tabsWidth <= availableWidth)
                     .onChange(of: browser.activeTabID) { _, activeTabID in
-                        guard let activeTabID else { return }
+                        guard let activeTabID, browser.tab(withID: activeTabID)?.isPinned == false else { return }
                         withAnimation(.easeOut(duration: 0.2)) {
                             scrollProxy.scrollTo(activeTabID)
                         }
@@ -86,7 +140,9 @@ struct TabStrip: View {
             .padding(.trailing, BrowserChrome.edgeInset)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .animation(.snappy(duration: 0.22), value: browser.tabs.map(\.id))
+            .animation(.snappy(duration: 0.22), value: browser.pinnedCount)
             .animation(.snappy(duration: 0.22), value: tabWidth)
+            .animation(.easeOut(duration: 0.15), value: showsPinDropZone)
         }
         .frame(height: BrowserChrome.tabRowHeight)
     }
@@ -116,10 +172,28 @@ struct TabStrip: View {
             .padding(.trailing, BrowserChrome.edgeInset)
             .frame(height: BrowserChrome.navigationBarHeight)
 
+            let pinned = pinnedTabs
+            if !pinned.isEmpty {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 44), spacing: 6)], spacing: 6) {
+                    ForEach(pinned, id: \.element.id) { index, tab in
+                        tabItem(for: tab, at: index, width: nil)
+                    }
+                }
+                .padding(.horizontal, BrowserChrome.edgeInset)
+                .padding(.vertical, 4)
+                Divider()
+                    .padding(.horizontal, BrowserChrome.edgeInset + 4)
+                    .padding(.vertical, 4)
+            } else if showsPinDropZone {
+                pinDropZone(width: nil, height: BrowserChrome.sidebarTabHeight + 2)
+                    .padding(.horizontal, BrowserChrome.edgeInset)
+                    .padding(.vertical, 4)
+            }
+
             ScrollViewReader { scrollProxy in
                 ScrollView(.vertical) {
                     VStack(spacing: 2) {
-                        ForEach(Array(browser.tabs.enumerated()), id: \.element.id) { index, tab in
+                        ForEach(unpinnedTabs, id: \.element.id) { index, tab in
                             tabItem(for: tab, at: index, width: nil)
                                 .id(tab.id)
                         }
@@ -130,15 +204,17 @@ struct TabStrip: View {
                 }
                 .scrollIndicators(.never)
                 .onChange(of: browser.activeTabID) { _, activeTabID in
-                    guard let activeTabID else { return }
+                    guard let activeTabID, browser.tab(withID: activeTabID)?.isPinned == false else { return }
                     withAnimation(.easeOut(duration: 0.2)) {
                         scrollProxy.scrollTo(activeTabID)
                     }
                 }
             }
             .contextMenu { stripMenu }
-            .animation(.snappy(duration: 0.22), value: browser.tabs.map(\.id))
         }
+        .animation(.snappy(duration: 0.22), value: browser.tabs.map(\.id))
+        .animation(.snappy(duration: 0.22), value: browser.pinnedCount)
+        .animation(.easeOut(duration: 0.15), value: showsPinDropZone)
     }
 
     private func tabItem(for tab: BrowserTab, at index: Int, width: CGFloat?) -> some View {
@@ -153,7 +229,8 @@ struct TabStrip: View {
                        isActive: isActive,
                        isHovered: isHovered,
                        width: width,
-                       height: layout == .vertical ? BrowserChrome.sidebarTabHeight : BrowserChrome.tabHeight,
+                       height: layout == .vertical ? (tab.isPinned ? 34 : BrowserChrome.sidebarTabHeight)
+                                                   : BrowserChrome.tabHeight,
                        select: {
                            suppressedHoverCardTabID = tab.id
                            hoverCardTabID = nil
@@ -216,6 +293,7 @@ struct TabStrip: View {
         Button("Reload") { browser.reloadTab(tab.id) }
             .disabled(tab.isNewTab)
         Button("Duplicate") { browser.duplicateTab(tab.id) }
+        Button(tab.isPinned ? "Unpin Tab" : "Pin Tab") { browser.setPinned(!tab.isPinned, for: tab.id) }
         Button("Copy Link") {
             guard let url = tab.url else { return }
             NSPasteboard.general.clearContents()
@@ -225,9 +303,9 @@ struct TabStrip: View {
         Divider()
         Button("Close Tab") { browser.closeTab(tab.id) }
         Button("Close Other Tabs") { browser.closeOtherTabs(than: tab.id) }
-            .disabled(browser.tabs.count < 2)
+            .disabled(!browser.canCloseOtherTabs(than: tab.id))
         Button("Close Tabs to the Right") { browser.closeTabs(after: tab.id) }
-            .disabled(index == browser.tabs.count - 1)
+            .disabled(!browser.tabs.dropFirst(index + 1).contains { !$0.isPinned })
         Divider()
         Button("Reopen Closed Tab") { browser.reopenClosedTab() }
             .disabled(!browser.canReopenClosedTab)
@@ -268,22 +346,7 @@ private struct TabItem: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
 
-        HStack(spacing: 7) {
-            if !(isCompact && showsCloseButton) {
-                TabIcon(tab: tab, isActive: isActive)
-                    .opacity(tab.isSuspended ? 0.5 : 1)
-            }
-            if !isCompact {
-                title
-            }
-            if showsCloseButton || !isCompact {
-                closeButton
-                    .opacity(showsCloseButton ? 1 : 0)
-                    .allowsHitTesting(showsCloseButton)
-            }
-        }
-        .padding(.leading, isCompact ? 0 : 10)
-        .padding(.trailing, isCompact ? 0 : 4)
+        content
         .frame(width: width, height: height)
         .frame(maxWidth: width == nil ? .infinity : nil)
         .background {
@@ -298,6 +361,36 @@ private struct TabItem: View {
         .onTapGesture(perform: select)
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .accessibilityElement(children: .contain)
+    }
+
+    /// A pinned tab shows only its icon, which it keeps while suspended, and closes with ⌘W.
+    @ViewBuilder
+    private var content: some View {
+        if tab.isPinned {
+            TabIcon(tab: tab, isActive: isActive)
+                .accessibilityElement()
+                .accessibilityLabel("Pinned Tab: \(tab.title)")
+                .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
+                .accessibilityAction(.default, select)
+                .help(tab.title)
+        } else {
+            HStack(spacing: 7) {
+                if !(isCompact && showsCloseButton) {
+                    TabIcon(tab: tab, isActive: isActive)
+                        .opacity(tab.isSuspended ? 0.5 : 1)
+                }
+                if !isCompact {
+                    title
+                }
+                if showsCloseButton || !isCompact {
+                    closeButton
+                        .opacity(showsCloseButton ? 1 : 0)
+                        .allowsHitTesting(showsCloseButton)
+                }
+            }
+            .padding(.leading, isCompact ? 0 : 10)
+            .padding(.trailing, isCompact ? 0 : 4)
+        }
     }
 
     private var title: some View {
@@ -445,6 +538,40 @@ private struct TabDropDelegate: DropDelegate {
 
     func validateDrop(info: DropInfo) -> Bool {
         draggedTabID != nil
+    }
+}
+
+/// Pins the dragged tab when it's dropped where the pinned tabs go.
+private struct PinDropDelegate: DropDelegate {
+    let browser: BrowserModel
+    @Binding var draggedTabID: UUID?
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let draggedTabID else { return false }
+        withAnimation(.snappy(duration: 0.2)) {
+            browser.setPinned(true, for: draggedTabID)
+        }
+        self.draggedTabID = nil
+        return true
+    }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedTabID != nil
+    }
+}
+
+private struct PinDropLabelStyle: LabelStyle {
+    let showsTitle: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) {
+            configuration.icon
+            if showsTitle { configuration.title }
+        }
     }
 }
 

@@ -31,6 +31,40 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(try PropertyListDecoder().decode(SessionSnapshot.self, from: data), snapshot)
     }
 
+    func testPinnedTabsAreSavedAndRestoredFirst() throws {
+        let saved = WindowSession(tabs: [
+            TabSession(url: page(titled: "Normal"), title: "Normal", interactionState: nil),
+            TabSession(url: page(titled: "Mail"), title: "Mail", interactionState: nil, isPinned: true),
+            TabSession(url: nil, title: "", interactionState: nil, isPinned: true),
+        ], selectedIndex: 0)
+        let data = try PropertyListEncoder.binary.encode(SessionSnapshot(windows: [saved]))
+        let decoded = try PropertyListDecoder().decode(SessionSnapshot.self, from: data)
+        XCTAssertEqual(decoded.windows, [saved])
+
+        let browser = BrowserModel()
+        browser.restoreSession(saved)
+
+        XCTAssertEqual(browser.tabs.map(\.title), ["Mail", "New Tab", "Normal"])
+        XCTAssertEqual(browser.tabs.map(\.isPinned), [true, true, false])
+        XCTAssertEqual(browser.activeTab?.title, "Normal")
+        let resaved = browser.windowSession()
+        XCTAssertEqual(resaved.tabs.map(\.isPinned), [true, true, false])
+        XCTAssertEqual(resaved.selectedIndex, 2)
+    }
+
+    func testTabsSavedBeforePinningAreUnpinned() throws {
+        struct OldTab: Codable {
+            var url: URL?
+            var title: String
+        }
+        let data = try PropertyListEncoder.binary.encode([OldTab(url: page(titled: "Old"), title: "Old")])
+
+        let tabs = try PropertyListDecoder().decode([TabSession].self, from: data)
+
+        XCTAssertEqual(tabs, [TabSession(url: page(titled: "Old"), title: "Old", interactionState: nil)])
+        XCTAssertFalse(tabs[0].isPinned)
+    }
+
     func testRestoredTabsAreSuspendedExceptTheSelectedOne() throws {
         let browser = BrowserModel()
         var session = window(["First", "Second", "Third"], selected: 2)
@@ -61,10 +95,10 @@ final class SessionTests: XCTestCase {
         let session = SessionStore(file: file)
         let browsers = (0..<4).map { _ in BrowserModel() }
 
-        XCTAssertEqual(session.attach(browsers[0]), 2)
-        XCTAssertEqual(session.attach(browsers[1]), 0)
-        XCTAssertEqual(session.attach(browsers[2]), 0)
-        XCTAssertEqual(session.attach(browsers[3]), 0)
+        XCTAssertEqual(session.attach(browsers[0]).count, 2)
+        XCTAssertEqual(session.attach(browsers[1]), [])
+        XCTAssertEqual(session.attach(browsers[2]), [])
+        XCTAssertEqual(session.attach(browsers[3]), [])
 
         XCTAssertEqual(browsers.map(\.activeTab?.title), ["A", "B", "C2", "New Tab"])
         XCTAssertTrue(session.reopenableWindows.isEmpty)
@@ -81,7 +115,7 @@ final class SessionTests: XCTestCase {
 
         let blank = BrowserModel()
         _ = session.attach(blank)
-        XCTAssertEqual(session.reopenLastSession(reusing: blank), 0)
+        XCTAssertEqual(session.reopenLastSession(reusing: blank), [])
 
         XCTAssertEqual(blank.tabs.map(\.title), ["One", "Two"])
         XCTAssertEqual(blank.activeTabID, blank.tabs[1].id)
@@ -95,7 +129,7 @@ final class SessionTests: XCTestCase {
         let session = SessionStore(file: file, restoresWindows: false)
         let browser = BrowserModel()
 
-        XCTAssertEqual(session.attach(browser), 0)
+        XCTAssertEqual(session.attach(browser), [])
         XCTAssertTrue(browser.isBlank)
         XCTAssertEqual(session.reopenableWindows.map { $0.tabs.map(\.title) }, [["A"], ["B"]])
 
@@ -127,7 +161,7 @@ final class SessionTests: XCTestCase {
 
         let relaunched = SessionStore(file: file)
         let restored = BrowserModel()
-        XCTAssertEqual(relaunched.attach(restored), 0)
+        XCTAssertEqual(relaunched.attach(restored), [])
         XCTAssertEqual(restored.activeTab?.title, "Saved")
     }
 }

@@ -12,6 +12,14 @@ final class BrowserTab: Identifiable {
     /// Hosts the web view, and the Web Inspector when it's docked, so both move together between windows and tabs.
     let contentView = NSView()
     var isNewTab = true
+    /// Pinned tabs stay first in the window, show only their icon, and open links to other sites in new tabs.
+    var isPinned = false {
+        didSet {
+            if isPinned != oldValue { browser?.extensions?.tabDidChange(self, .pinned) }
+        }
+    }
+    /// The tab as extensions see it.
+    @ObservationIgnored let extensionTab = WebExtensionTab()
     /// The tab whose page opened this one, so its links and pop-ups open next to each other.
     @ObservationIgnored var openerID: UUID?
     /// Whether another page's script opened this one, and can still reach it through `window.opener`.
@@ -61,7 +69,8 @@ final class BrowserTab: Identifiable {
     /// Pass the configuration WebKit provides when a page opens a window, so the new page keeps its opener.
     init(configuration: WKWebViewConfiguration = BrowserTab.makeConfiguration()) {
         pageDelegate.tab = self
-        install(WKWebView(frame: .zero, configuration: configuration))
+        extensionTab.tab = self
+        install(BrowserWebView(frame: .zero, configuration: configuration))
     }
 
     /// A suspended tab for a page's saved history, such as a duplicated or reopened tab, which loads when it's selected.
@@ -75,6 +84,7 @@ final class BrowserTab: Identifiable {
         // The page is already in history, so loading it again on restore isn't another visit.
         historyVisit = url.map { (nil, $0) }
         pageDelegate.tab = self
+        extensionTab.tab = self
     }
 
     var isSuspended: Bool {
@@ -89,6 +99,7 @@ final class BrowserTab: Identifiable {
     /// Restoring keeps the suspended page's state until the new web view reports its own, which it only does
     /// once the page starts loading, so the tab's title and address don't flash blank.
     private func install(_ webView: WKWebView, isRestoring: Bool = false) {
+        (webView as? BrowserWebView)?.tab = self
         webView.isInspectable = true
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
@@ -98,12 +109,13 @@ final class BrowserTab: Identifiable {
         contentView.addSubview(webView)
         webView.navigationDelegate = pageDelegate
         webView.uiDelegate = pageDelegate
-        ContentBlocker.shared.attach(webView.configuration.userContentController)
         self.webView = webView
 
         let options: NSKeyValueObservingOptions = isRestoring ? [] : .initial
         observe(webView, \.url, options) { tab, webView in
             tab.url = tab.loadError?.url ?? webView.url
+            tab.browser?.extensions?.tabDidChange(tab, .URL)
+            tab.browser?.onTabsChange?()
             // Same-document navigations don't load, but can still change the icon and add to history.
             if !webView.isLoading {
                 tab.updateFavicon()
@@ -113,10 +125,12 @@ final class BrowserTab: Identifiable {
         observe(webView, \.title, options) { tab, webView in
             tab.pageTitle = webView.title ?? ""
             tab.updateVisitTitle()
+            tab.browser?.extensions?.tabDidChange(tab, .title)
         }
         observe(webView, \.isLoading, options) { tab, webView in
             let didFinish = tab.isLoading && !webView.isLoading
             tab.isLoading = webView.isLoading
+            tab.browser?.extensions?.tabDidChange(tab, .loading)
             if didFinish {
                 tab.scheduleThumbnail()
                 tab.updateFavicon()
@@ -149,8 +163,9 @@ final class BrowserTab: Identifiable {
     /// A pop-up gets a fresh configuration too, since its tie to the opener can't be restored.
     func restore() {
         guard isSuspended else { return }
-        let webView = WKWebView(frame: .zero, configuration: browser?.makeConfiguration() ?? Self.makeConfiguration())
+        let webView = BrowserWebView(frame: .zero, configuration: browser?.makeConfiguration() ?? Self.makeConfiguration())
         install(webView, isRestoring: true)
+        webView.customUserAgent = browser?.compatibility.userAgent(for: url)
         if let suspendedState {
             webView.interactionState = suspendedState
         } else if let url {
@@ -218,6 +233,7 @@ final class BrowserTab: Identifiable {
         configuration.applicationNameForUserAgent = "Version/\(safariVersion) Safari/605.1.15"
         configuration.preferences.isElementFullscreenEnabled = true
         configuration.preferences.isTextInteractionEnabled = true
+        WebAuthnShim.install(in: configuration.userContentController, isEntitled: Passkeys.shared.isEntitled)
         #if DEBUG
         WebInspector.enableDeveloperExtras(in: configuration)
         #endif
@@ -253,6 +269,23 @@ final class BrowserTab: Identifiable {
         url?.host()
     }
 
+    /// The part of a host that names its site, so `mail.example.com` and `example.com` are the same site. Without a
+    /// list of public suffixes, a short second-level label before a country code, like `co.uk`, counts as a suffix.
+    nonisolated static func site(of host: String) -> String {
+        let host = host.lowercased()
+        let labels = host.split(separator: ".")
+        guard labels.count > 2, !host.allSatisfy({ $0.isNumber || $0 == "." }) else { return host }
+        let isCountrySuffix = labels[labels.count - 1].count == 2 && labels[labels.count - 2].count <= 3
+        return labels.suffix(isCountrySuffix ? 3 : 2).joined(separator: ".")
+    }
+
+    /// Whether a link leaves the site the page is on, for pinned tabs, which open such links in a new tab.
+    nonisolated static func leavesSite(from current: URL?, to destination: URL?) -> Bool {
+        guard let currentHost = current?.host(), let destinationHost = destination?.host(),
+              ["http", "https"].contains(destination?.scheme?.lowercased() ?? "") else { return false }
+        return site(of: currentHost) != site(of: destinationHost)
+    }
+
     var isSecure: Bool {
         url?.scheme == "https" && hasOnlySecureContent && loadError == nil
     }
@@ -269,8 +302,19 @@ final class BrowserTab: Identifiable {
         if let webView { Self.load(url, in: webView) }
     }
 
+    /// Records a crash of the page's web process, and tells whether it crashed again soon after the last one, in which
+    /// case reloading would likely crash it again.
+    func recordCrash(at time: ContinuousClock.Instant = .now) -> Bool {
+        recentCrashes = recentCrashes.filter { time - $0 < .seconds(30) } + [time]
+        return recentCrashes.count > 1
+    }
+
+    @ObservationIgnored private var recentCrashes: [ContinuousClock.Instant] = []
+
     /// A local file, such as an HTML file opened from the Finder, may only read itself.
     private static func load(_ url: URL, in webView: WKWebView) {
+        // A site told it's in another browser is told so from the first request.
+        webView.customUserAgent = (webView as? BrowserWebView)?.tab?.browser?.compatibility.userAgent(for: url)
         if url.isFileURL {
             webView.loadFileURL(url, allowingReadAccessTo: url)
         } else {

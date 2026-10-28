@@ -23,7 +23,40 @@ final class PageDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
             browser.openChildTab(of: tab, loading: navigationAction.request, select: false)
             return .cancel
         }
+        // A pinned tab stays on its site, like Safari's.
+        if navigationAction.navigationType == .linkActivated, navigationAction.targetFrame?.isMainFrame == true,
+           let tab, tab.isPinned, let browser = tab.browser,
+           BrowserTab.leavesSite(from: webView.url, to: navigationAction.request.url) {
+            browser.openChildTab(of: tab, loading: navigationAction.request, select: true)
+            return .cancel
+        }
+        if navigationAction.targetFrame?.isMainFrame == true, let browser = tab?.browser,
+           identifyAgain(as: browser.compatibility.userAgent(for: navigationAction.request.url), in: webView,
+                         for: navigationAction) {
+            return .cancel
+        }
         return .allow
+    }
+
+    /// Switches the page's user agent when it navigates to a site told it's in another browser, or back. A request
+    /// already has its user agent, so the navigation starts over with the new one. Going back or forward can't start
+    /// over, and keeps the agent it has until the next load; neither can a form that posts data.
+    private func identifyAgain(as userAgent: String?, in webView: WKWebView,
+                               for navigationAction: WKNavigationAction) -> Bool {
+        let current = webView.customUserAgent.flatMap { $0.isEmpty ? nil : $0 }
+        guard current != userAgent else { return false }
+        webView.customUserAgent = userAgent
+        switch navigationAction.navigationType {
+        case .backForward:
+            return false
+        case .reload:
+            webView.reload()
+            return true
+        default:
+            guard (navigationAction.request.httpMethod ?? "GET") == "GET" else { return false }
+            webView.load(navigationAction.request)
+            return true
+        }
     }
 
     func webView(_ webView: WKWebView,
@@ -139,6 +172,12 @@ final class PageDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// suspended, and loads again when it's selected.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard let tab else { return }
+        // A page that crashes again right away would crash in a loop, so it shows an error instead.
+        if tab.recordCrash() {
+            let url = webView.url ?? tab.url
+            tab.showLoadError(PageLoadError(kind: .crashed, url: url), coversPreviousPage: false)
+            return
+        }
         if tab.browser?.activeTabID == tab.id {
             webView.reload()
         } else {

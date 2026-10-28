@@ -6,6 +6,7 @@ struct NewTabView: View {
     let browser: BrowserModel
     let focusAddress: () -> Void
     @State private var contentWidth: CGFloat = 0
+    @State private var prompt: BookmarkPrompt?
     @AppStorage(NewTabPage.storageKey) private var page = NewTabPage.startPage
 
     private let horizontalPadding: CGFloat = 32
@@ -113,13 +114,16 @@ struct NewTabView: View {
                             browser.open(bookmark.url,
                                          inNewTab: NSApp.currentEvent?.modifierFlags.contains(.command) == true)
                         }
-                        .contextMenu { BookmarkMenu(bookmark: bookmark, bookmarks: bookmarks, browser: browser) }
+                        .contextMenu {
+                            BookmarkMenu(bookmark: bookmark, bookmarks: bookmarks, browser: browser) { prompt = $0 }
+                        }
                     }
                 }
             }
         }
         .frame(maxWidth: 560)
         .fixedSize(horizontal: !bookmarks.bookmarks.isEmpty, vertical: false)
+        .bookmarkPrompts($prompt, bookmarks: bookmarks)
     }
 
     static func greeting(for date: Date) -> String {

@@ -10,6 +10,8 @@ struct PageLoadError: Equatable {
         case timedOut
         case invalidCertificate
         case secureConnectionFailed
+        /// The page's web process crashed again right after reloading, so it isn't reloaded again.
+        case crashed
         case other(String)
     }
 
@@ -68,6 +70,7 @@ struct PageLoadError: Equatable {
         case .timedOut: "The Server Isn’t Responding"
         case .invalidCertificate: "This Connection Isn’t Private"
         case .secureConnectionFailed: "Can’t Establish a Secure Connection"
+        case .crashed: "This Page Keeps Crashing"
         case .other: "Can’t Open This Page"
         }
     }
@@ -87,6 +90,9 @@ struct PageLoadError: Equatable {
                 + "your personal or financial information, so Browser won’t open it."
         case .secureConnectionFailed:
             "Browser can’t establish a secure connection to the server “\(host)”."
+        case .crashed:
+            "A problem with the page on “\(host)” made it close more than once, so Browser stopped reloading it. "
+                + "It may need a feature WebKit doesn’t have; you can open it in another browser."
         case .other(let description):
             description
         }
@@ -96,6 +102,7 @@ struct PageLoadError: Equatable {
         switch kind {
         case .offline: "wifi.slash"
         case .invalidCertificate, .secureConnectionFailed: "lock.slash"
+        case .crashed: "exclamationmark.octagon"
         default: "exclamationmark.triangle"
         }
     }
@@ -105,6 +112,8 @@ struct PageLoadError: Equatable {
 struct PageErrorView: View {
     let error: PageLoadError
     let isLoading: Bool
+    /// Another browser that might show the page, offered for errors other than certificate ones.
+    var otherBrowser: OtherBrowsers.App? = nil
     let retry: () -> Void
 
     var body: some View {
@@ -120,10 +129,15 @@ struct PageErrorView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
-            Button("Try Again", action: retry)
-                .controlSize(.large)
-                .disabled(isLoading)
-                .padding(.top, 6)
+            HStack {
+                Button("Try Again", action: retry)
+                    .disabled(isLoading)
+                if let otherBrowser, let url = error.url, error.kind != .invalidCertificate {
+                    Button("Open in \(otherBrowser.name)") { OtherBrowsers.open(url, in: otherBrowser) }
+                }
+            }
+            .controlSize(.large)
+            .padding(.top, 6)
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

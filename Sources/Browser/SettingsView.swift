@@ -2,39 +2,99 @@ import LocalAuthentication
 import SwiftUI
 import WebKit
 
-/// Browser ▸ Settings (⌘,).
+enum SettingsTab: String {
+    case general
+    case appearance
+    case profiles
+    case privacy
+    case passwords
+    case siteSettings
+    case downloads
+    case extensions
+
+    static let storageKey = "settingsTab"
+}
+
+/// Browser ▸ Settings (⌘,). Privacy, Passwords, and Site Settings show one profile's at a time.
 struct SettingsView: View {
-    let browsingData: BrowsingData
-    let contentBlocker: ContentBlocker
-    let sitePermissions: SitePermissions
-    let zoomLevels: ZoomStore
-    let passwords: PasswordManager
+    let profiles: ProfileStore
     let passkeys: Passkeys
     let updater: AppUpdater
+    @AppStorage(SettingsTab.storageKey) private var tab = SettingsTab.general
+    /// `nil` for the default profile.
+    @State private var profileID: UUID?
+
+    private var data: ProfileData {
+        profiles.data(for: profileID)
+    }
+
+    private var profilePicker: ProfilePickerSection {
+        ProfilePickerSection(profiles: profiles, selection: Binding(get: { data.id }, set: { profileID = $0 }))
+    }
 
     var body: some View {
-        TabView {
-            GeneralSettings(updater: updater)
+        TabView(selection: $tab) {
+            GeneralSettings(updater: updater, profiles: profiles)
                 .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(SettingsTab.general)
             AppearanceSettings()
                 .tabItem { Label("Appearance", systemImage: "macwindow") }
-            PrivacySettings(browsingData: browsingData, contentBlocker: contentBlocker)
+                .tag(SettingsTab.appearance)
+            ProfileSettings(profiles: profiles)
+                .tabItem { Label("Profiles", systemImage: "person.2") }
+                .tag(SettingsTab.profiles)
+            // Switching profiles starts each tab over, so nothing from one profile shows for another. Each tab needs
+            // an ID of its own, or the tab bar shows one tab's label for all of them.
+            PrivacySettings(browsingData: data.browsingData, contentBlocker: data.contentBlocker, profiles: profiles,
+                            profilePicker: profilePicker)
+                .id("privacy-\(data.id)")
                 .tabItem { Label("Privacy", systemImage: "hand.raised") }
-            PasswordSettings(passwords: passwords, passkeys: passkeys)
+                .tag(SettingsTab.privacy)
+            PasswordSettings(passwords: data.passwords, passkeys: passkeys, profilePicker: profilePicker)
+                .id("passwords-\(data.id)")
                 .tabItem { Label("Passwords", systemImage: "key") }
-            SiteSettings(contentBlocker: contentBlocker, sitePermissions: sitePermissions, zoomLevels: zoomLevels)
+                .tag(SettingsTab.passwords)
+            SiteSettings(contentBlocker: data.contentBlocker, sitePermissions: data.sitePermissions,
+                         zoomLevels: data.zoomLevels, compatibility: data.compatibility, profilePicker: profilePicker)
+                .id("siteSettings-\(data.id)")
                 .tabItem { Label("Site Settings", systemImage: "globe") }
+                .tag(SettingsTab.siteSettings)
             DownloadSettings()
                 .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
+                .tag(SettingsTab.downloads)
+            ExtensionSettings(store: data.extensions, profilePicker: profilePicker)
+                .id("extensions-\(data.id)")
+                .tabItem { Label("Extensions", systemImage: "puzzlepiece.extension") }
+                .tag(SettingsTab.extensions)
         }
         .formStyle(.grouped)
         .frame(width: 580, height: 500)
     }
 }
 
+/// Chooses whose settings a tab shows, once there's more than one profile.
+struct ProfilePickerSection: View {
+    let profiles: ProfileStore
+    @Binding var selection: UUID
+
+    var body: some View {
+        if profiles.profiles.count > 1 {
+            Section {
+                Picker("Profile", selection: $selection) {
+                    ForEach(profiles.profiles) { profile in
+                        Text(profile.displayName).tag(profile.id)
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct GeneralSettings: View {
     @Bindable var updater: AppUpdater
+    let profiles: ProfileStore
     @State private var defaultBrowser = DefaultBrowser()
+    @State private var isShowingImport = false
     @AppStorage(SearchEngine.storageKey) private var searchEngine = SearchEngine.google
     @AppStorage(NewTabPage.storageKey) private var newTabPage = NewTabPage.startPage
     @AppStorage(SessionPreferences.restoresWindowsKey) private var restoresWindows = true
@@ -71,6 +131,19 @@ private struct GeneralSettings: View {
                 }
             }
 
+            Section {
+                LabeledContent {
+                    Button("Import…") { isShowingImport = true }
+                } label: {
+                    Text("Import from another browser")
+                    Text("Bookmarks, history, and passwords from Safari, Chrome, Arc, Brave, Edge, or Firefox.")
+                }
+            }
+
+            if let sync = profiles.sync {
+                ICloudSyncSection(sync: sync)
+            }
+
             if updater.isAvailable {
                 Section("Updates") {
                     Toggle("Check for updates automatically", isOn: $updater.checksAutomatically)
@@ -82,6 +155,9 @@ private struct GeneralSettings: View {
                     }
                 }
             }
+        }
+        .sheet(isPresented: $isShowingImport) {
+            BrowserImportView(profiles: profiles, profileID: profiles.defaultProfileID)
         }
         .task { defaultBrowser.refresh() }
         // The default browser can also change in System Settings while Settings is open.
@@ -96,6 +172,7 @@ private struct GeneralSettings: View {
 private struct PasswordSettings: View {
     @Bindable var passwords: PasswordManager
     let passkeys: Passkeys
+    let profilePicker: ProfilePickerSection
     @State private var isUnlocked = false
     @State private var query = ""
     @State private var revealed: [SavedPassword.ID: String] = [:]
@@ -111,6 +188,8 @@ private struct PasswordSettings: View {
 
     var body: some View {
         Form {
+            profilePicker
+
             Section {
                 Toggle(isOn: $passwords.offersToSave) {
                     Text("Offer to save passwords")
@@ -210,8 +289,15 @@ private struct PasswordSettings: View {
     @ViewBuilder
     private var passkeyStatus: some View {
         if !passkeys.isEntitled {
-            Text("Signing in with passkeys and security keys isn’t available in this version of Browser yet.")
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Passkeys and security keys aren’t available in this build of Browser.")
+                Text("Apple only lets a browser use them once it grants the app its web browser passkey "
+                     + "entitlement, and this build doesn’t have it. Websites see a browser without passkey "
+                     + "support, so they offer your password or another way to sign in instead.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         } else {
             switch passkeys.authorizationState {
             case .authorized:
@@ -275,6 +361,8 @@ private struct AppearanceSettings: View {
 private struct PrivacySettings: View {
     let browsingData: BrowsingData
     let contentBlocker: ContentBlocker
+    let profiles: ProfileStore
+    let profilePicker: ProfilePickerSection
     @State private var isShowingClearData = false
     @State private var query = ""
     @State private var isConfirmingRemoveAll = false
@@ -287,11 +375,13 @@ private struct PrivacySettings: View {
 
     var body: some View {
         Form {
+            profilePicker
+
             Section {
-                Toggle(isOn: Binding(get: { contentBlocker.isEnabled }, set: { contentBlocker.setEnabled($0) })) {
+                Toggle(isOn: Binding(get: { contentBlocker.isEnabled }, set: { profiles.setTrackerBlocking($0) })) {
                     Text("Block trackers")
-                    Text("Stops known tracking and advertising services from loading on other sites. "
-                         + "You can turn it off for a site from the shield in the address bar.")
+                    Text("Stops known tracking and advertising services from loading on other sites, in every "
+                         + "profile. You can turn it off for a site from the shield in the address bar.")
                 }
                 LabeledContent("History and website data") {
                     Button("Clear…") { isShowingClearData = true }
@@ -350,9 +440,13 @@ private struct SiteSettings: View {
     let contentBlocker: ContentBlocker
     let sitePermissions: SitePermissions
     let zoomLevels: ZoomStore
+    let compatibility: SiteCompatibility
+    let profilePicker: ProfilePickerSection
 
     var body: some View {
         Form {
+            profilePicker
+
             Section {
                 let sites = sitePermissions.mediaDecisions
                 if sites.isEmpty {
@@ -417,6 +511,36 @@ private struct SiteSettings: View {
                     Task { await contentBlocker.removeAllExceptions() }
                 }
             }
+
+            Section {
+                let sites = compatibility.identities.sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
+                if sites.isEmpty {
+                    Text("Every site is told it’s in Safari.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(sites, id: \.key) { site, identity in
+                    HStack {
+                        Text(site)
+                        Spacer()
+                        Picker("Identify as", selection: Binding(get: { identity },
+                                                                 set: { compatibility.setIdentity($0, forSite: site) })) {
+                            ForEach(BrowserIdentity.allCases) { Text($0.shortTitle).tag($0) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        removeButton { compatibility.setIdentity(.safari, forSite: site) }
+                    }
+                }
+            } header: {
+                sectionHeader("Website Compatibility", isEmpty: compatibility.identities.isEmpty) {
+                    compatibility.removeAll()
+                }
+            } footer: {
+                Text("Sites that turn away browsers they don’t recognize often work when told they’re in Chrome. "
+                     + "Choose in View ▸ Website Compatibility.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -458,6 +582,31 @@ private struct DownloadSettings: View {
                 Text("Ask where to save each download")
                 Text("When off, downloads save to the Downloads folder.")
             }
+        }
+    }
+}
+
+/// Settings ▸ General ▸ iCloud: whether bookmarks and open tabs sync to the user's other devices.
+private struct ICloudSyncSection: View {
+    let sync: CloudSync
+
+    var body: some View {
+        Section("iCloud") {
+            Toggle(isOn: Binding(get: { sync.isEnabled }, set: { sync.setEnabled($0) })) {
+                Text("Sync bookmarks and open tabs")
+                Text(statusText)
+            }
+            .disabled(!sync.isAvailable)
+        }
+    }
+
+    private var statusText: String {
+        switch sync.status {
+        case .unavailable: "This build isn’t signed for iCloud."
+        case .off: "Each profile’s bookmarks and tabs stay on this Mac."
+        case .syncing: "Syncing…"
+        case .upToDate(let date): "Up to date, \(date.formatted(.relative(presentation: .named)))."
+        case .failed(let message): "Couldn’t sync: \(message)"
         }
     }
 }

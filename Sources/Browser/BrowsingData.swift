@@ -32,7 +32,7 @@ struct ClearDataOptions: OptionSet, Hashable {
     }
 }
 
-/// The history and website data normal windows keep, which Settings ▸ Privacy and History ▸ Clear History and
+/// The history and website data a profile's windows keep, which Settings ▸ Privacy and History ▸ Clear History and
 /// Website Data remove. Private windows keep theirs apart, and lose it when they close.
 @MainActor
 @Observable
@@ -40,23 +40,27 @@ final class BrowsingData {
     let history: HistoryStore
     let session: SessionStore
     @ObservationIgnored let dataStore: WKWebsiteDataStore
+    /// The profile whose closed windows clearing all history forgets.
+    @ObservationIgnored let profileID: UUID?
     /// Sites with cookies, storage, or cache, sorted by name. Empty until `loadSiteRecords()`.
     private(set) var siteRecords: [WKWebsiteDataRecord] = []
     private(set) var hasLoadedSiteRecords = false
 
-    init(history: HistoryStore, session: SessionStore, dataStore: WKWebsiteDataStore = .default()) {
+    init(history: HistoryStore, session: SessionStore, dataStore: WKWebsiteDataStore = .default(),
+         profileID: UUID? = nil) {
         self.history = history
         self.session = session
         self.dataStore = dataStore
+        self.profileID = profileID
     }
 
-    /// Removes what the options name from the time range. Clearing all history also forgets the closed windows
-    /// that History ▸ Reopen All Windows from Last Session would open.
+    /// Removes what the options name from the time range. Clearing all history also forgets the profile's closed
+    /// windows that History ▸ Reopen All Windows from Last Session would open.
     func clear(_ options: ClearDataOptions, range: HistoryClearRange, now: Date = .now) async {
         let start = range.start(now: now)
         if options.contains(.history) {
             history.clear(range, now: now)
-            if range == .all { session.forgetClosedWindows() }
+            if range == .all { session.forgetClosedWindows(in: profileID) }
         }
         let types = options.websiteDataTypes()
         if !types.isEmpty {
@@ -125,7 +129,8 @@ struct ClearDataView: View {
                 Toggle("Site icons", isOn: binding(for: .favicons))
             }
 
-            Text("Private windows aren’t affected. Their data is removed when they close.")
+            Text("Other profiles and private windows aren’t affected. A private window’s data is removed when it "
+                 + "closes.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

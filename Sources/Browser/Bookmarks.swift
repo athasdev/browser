@@ -1,22 +1,6 @@
 import AppKit
 import Foundation
-import Observation
 import SwiftUI
-
-struct Bookmark: Identifiable, Codable, Equatable {
-    var id = UUID()
-    var title: String
-    var url: URL
-
-    var displayTitle: String {
-        if !title.isEmpty { return title }
-        return url.host().map(Bookmark.trimmedHost) ?? url.absoluteString
-    }
-
-    static func trimmedHost(_ host: String) -> String {
-        host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
-    }
-}
 
 enum BookmarksBarVisibility: String, CaseIterable, Identifiable {
     case always
@@ -35,77 +19,21 @@ enum BookmarksBarVisibility: String, CaseIterable, Identifiable {
         }
     }
 
+    /// For the bookmarks bar's Show Bookmarks Bar menu.
+    var shortTitle: String {
+        switch self {
+        case .always: "Always"
+        case .newTabOnly: "Only on New Tabs"
+        case .never: "Never"
+        }
+    }
+
     func isVisible(onNewTab isNewTab: Bool) -> Bool {
         switch self {
         case .always: true
         case .newTabOnly: isNewTab
         case .never: false
         }
-    }
-}
-
-@MainActor
-@Observable
-final class BookmarkStore {
-    private(set) var bookmarks: [Bookmark] = []
-    @ObservationIgnored private let defaults: UserDefaults
-    private static let storageKey = "bookmarks"
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        if let data = defaults.data(forKey: Self.storageKey),
-           let bookmarks = try? JSONDecoder().decode([Bookmark].self, from: data) {
-            self.bookmarks = bookmarks
-        }
-    }
-
-    func bookmark(for url: URL?) -> Bookmark? {
-        guard let url else { return nil }
-        return bookmarks.first { $0.url == url }
-    }
-
-    func isBookmarked(_ url: URL?) -> Bool {
-        bookmark(for: url) != nil
-    }
-
-    func add(title: String, url: URL) {
-        guard !isBookmarked(url) else { return }
-        bookmarks.append(Bookmark(title: title, url: url))
-        save()
-    }
-
-    /// Adds the page when it isn't bookmarked yet, otherwise removes it.
-    func toggle(title: String, url: URL) {
-        if let bookmark = bookmark(for: url) {
-            remove(bookmark.id)
-        } else {
-            add(title: title, url: url)
-        }
-    }
-
-    func remove(_ id: UUID) {
-        bookmarks.removeAll { $0.id == id }
-        save()
-    }
-
-    func rename(_ id: UUID, to title: String) {
-        guard let index = bookmarks.firstIndex(where: { $0.id == id }) else { return }
-        bookmarks[index].title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        save()
-    }
-
-    func move(_ id: UUID, to destinationIndex: Int) {
-        guard let sourceIndex = bookmarks.firstIndex(where: { $0.id == id }),
-              bookmarks.indices.contains(destinationIndex),
-              sourceIndex != destinationIndex else { return }
-        bookmarks.move(fromOffsets: IndexSet(integer: sourceIndex),
-                       toOffset: destinationIndex > sourceIndex ? destinationIndex + 1 : destinationIndex)
-        save()
-    }
-
-    private func save() {
-        guard let data = try? JSONEncoder().encode(bookmarks) else { return }
-        defaults.set(data, forKey: Self.storageKey)
     }
 }
 

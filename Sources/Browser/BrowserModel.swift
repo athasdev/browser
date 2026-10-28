@@ -6,20 +6,39 @@ import WebKit
 @MainActor
 @Observable
 final class BrowserModel {
+    /// The profile whose data the window uses, or `nil` for a private window.
+    let profileID: UUID?
+    /// The profile whose window opened a private window, which lends it its bookmarks and tracker blocking.
+    let openerProfileID: UUID?
     let downloads: DownloadManager
+    let bookmarks: BookmarkStore
+    let contentBlocker: ContentBlocker
     let sitePermissions: SitePermissions
     /// `nil` for a window whose pages aren't remembered.
     let history: HistoryStore?
     let zoomLevels: ZoomStore
+    /// The browser each site is told it's in. A private window uses its opener's choices without changing them.
+    let compatibility: SiteCompatibility
     /// Shared by the window's tabs. A private window's keeps its cookies and site data in memory, apart from
     /// other windows, until the window closes.
     let websiteDataStore: WKWebsiteDataStore
     /// Offers to save sign-ins and fills them in. `nil` for a window whose pages aren't remembered.
     let passwords: PasswordManager?
+    /// The profile's extensions, which a private window doesn't run.
+    let extensions: WebExtensionStore?
+    /// The window as extensions see it.
+    @ObservationIgnored let extensionWindow = WebExtensionWindow()
     /// The window showing these tabs, so links from other apps can open in the frontmost one.
     @ObservationIgnored weak var window: NSWindow?
 
-    private(set) var tabs: [BrowserTab] = []
+    private(set) var tabs: [BrowserTab] = [] {
+        didSet {
+            extensions?.tabsDidChange(in: self, from: oldValue)
+            onTabsChange?()
+        }
+    }
+    /// Called when tabs open, close, or show another page, so other devices can list them.
+    @ObservationIgnored var onTabsChange: (() -> Void)?
     private var closedTabs: [ClosedTab] = []
     var activeTabID: UUID? {
         didSet {
@@ -31,12 +50,16 @@ final class BrowserModel {
             }
             activeTab?.restore()
             activeTab?.didBecomeSelected()
+            extensions?.didActivate(activeTab, previous: tab(withID: oldValue), in: self)
         }
     }
     var addressFocusRequest = 0
     var findFocusRequest = 0
     var isShowingHistory = false
     var isShowingClearData = false
+    var isShowingImport = false
+    /// Shows the bookmark editor under the address bar's star, for ⌘D.
+    var isEditingBookmark = false
     @ObservationIgnored private var suspender: TabSuspender?
 
     private struct ClosedTab {
@@ -44,26 +67,49 @@ final class BrowserModel {
         let title: String
         /// The tab's back-forward history, restored when it reopens.
         let interactionState: Any?
+        let isPinned: Bool
     }
 
-    init(downloads: DownloadManager = DownloadManager(), sitePermissions: SitePermissions = .shared,
-         history: HistoryStore? = nil, zoomLevels: ZoomStore = .shared,
-         websiteDataStore: WKWebsiteDataStore = .default(), passwords: PasswordManager? = nil) {
+    init(downloads: DownloadManager = DownloadManager(), sitePermissions: SitePermissions = SitePermissions(),
+         history: HistoryStore? = nil, zoomLevels: ZoomStore = ZoomStore(defaults: nil),
+         websiteDataStore: WKWebsiteDataStore = .default(), passwords: PasswordManager? = nil,
+         bookmarks: BookmarkStore = BookmarkStore(defaults: nil), contentBlocker: ContentBlocker = ContentBlocker(),
+         extensions: WebExtensionStore? = nil, compatibility: SiteCompatibility = SiteCompatibility(),
+         profileID: UUID? = nil, openerProfileID: UUID? = nil) {
+        self.profileID = websiteDataStore.isPersistent ? profileID : nil
+        self.openerProfileID = openerProfileID
         self.downloads = downloads
+        self.bookmarks = bookmarks
+        self.contentBlocker = contentBlocker
         self.sitePermissions = sitePermissions
         self.history = history
         self.zoomLevels = zoomLevels
+        self.compatibility = compatibility
         self.websiteDataStore = websiteDataStore
         self.passwords = websiteDataStore.isPersistent ? passwords : nil
+        self.extensions = websiteDataStore.isPersistent ? extensions : nil
+        extensionWindow.browser = self
         addTab()
         suspender = TabSuspender(browser: self)
     }
 
+    /// A window of one of the user's profiles.
+    convenience init(profile: ProfileData, downloads: DownloadManager) {
+        self.init(downloads: downloads, sitePermissions: profile.sitePermissions, history: profile.history,
+                  zoomLevels: profile.zoomLevels, websiteDataStore: profile.websiteDataStore,
+                  passwords: profile.passwords, bookmarks: profile.bookmarks, contentBlocker: profile.contentBlocker,
+                  extensions: profile.extensions, compatibility: profile.compatibility, profileID: profile.id)
+    }
+
     /// A window that keeps nothing once it closes: no history, zoom levels, site permissions, or passwords, and
-    /// cookies and site data its tabs share only with each other. Downloads still save.
-    static func makePrivate(downloads: DownloadManager) -> BrowserModel {
+    /// cookies and site data its tabs share only with each other. It belongs to no profile, but shows the bookmarks
+    /// and blocks trackers like the profile that opened it. Downloads and bookmarks still save.
+    static func makePrivate(downloads: DownloadManager, openedFrom profile: ProfileData? = nil) -> BrowserModel {
         BrowserModel(downloads: downloads, sitePermissions: SitePermissions(), history: nil,
-                     zoomLevels: ZoomStore(defaults: nil), websiteDataStore: .nonPersistent())
+                     zoomLevels: ZoomStore(defaults: nil), websiteDataStore: .nonPersistent(),
+                     bookmarks: profile?.bookmarks ?? BookmarkStore(defaults: nil),
+                     contentBlocker: profile?.contentBlocker ?? ContentBlocker(),
+                     compatibility: profile?.compatibility ?? SiteCompatibility(), openerProfileID: profile?.id)
     }
 
     var isPrivate: Bool {
@@ -71,10 +117,13 @@ final class BrowserModel {
     }
 
     /// A configuration for one of the window's pages. Pop-ups get theirs from WebKit, copied from the opener's,
-    /// so they keep its data store.
+    /// so they keep its data store, and share its content controller, with its tracker blocking and scripts.
     func makeConfiguration() -> WKWebViewConfiguration {
         let configuration = BrowserTab.makeConfiguration()
         configuration.websiteDataStore = websiteDataStore
+        contentBlocker.attach(configuration.userContentController)
+        if let extensions { configuration.webExtensionController = extensions.controller }
+        Passkeys.shared.requestAuthorizationIfNeeded()
         if passwords != nil {
             PasswordAutofill.install(in: configuration.userContentController,
                                      handler: PasswordMessageHandler(browser: self))
@@ -117,30 +166,56 @@ final class BrowserModel {
         // The copy starts suspended, so selecting it restores the original's history and scroll position.
         let tab = original.url == nil ? makeTab()
             : adopt(BrowserTab(url: original.url, title: original.pageTitle, interactionState: original.interactionState))
+        tab.isPinned = original.isPinned
         tabs.insert(tab, at: index + 1)
         activeTabID = tab.id
     }
 
+    /// Moves a tab to where another one is. A tab moved among the pinned tabs is pinned, and one moved among the
+    /// others is unpinned, so the pinned tabs stay first.
     func moveTab(_ id: UUID, to destinationIndex: Int) {
         guard let sourceIndex = tabs.firstIndex(where: { $0.id == id }),
               tabs.indices.contains(destinationIndex),
               sourceIndex != destinationIndex else { return }
+        let isPinned = tabs[destinationIndex].isPinned
         tabs.move(fromOffsets: IndexSet(integer: sourceIndex),
                   toOffset: destinationIndex > sourceIndex ? destinationIndex + 1 : destinationIndex)
+        tabs[destinationIndex].isPinned = isPinned
     }
 
+    /// How many tabs at the start of the window are pinned.
+    var pinnedCount: Int {
+        tabs.prefix(while: \.isPinned).count
+    }
+
+    /// Pins a tab after the other pinned tabs, or unpins it to the start of the rest.
+    func setPinned(_ isPinned: Bool, for id: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].isPinned != isPinned else { return }
+        let tab = tabs.remove(at: index)
+        tab.isPinned = isPinned
+        tabs.insert(tab, at: pinnedCount)
+    }
+
+    /// Whether Close Other Tabs would close anything. Pinned tabs stay open.
+    func canCloseOtherTabs(than id: UUID) -> Bool {
+        tabs.contains { $0.id != id && !$0.isPinned }
+    }
+
+    /// Closes the other tabs, except pinned ones.
     func closeOtherTabs(than id: UUID) {
         guard tabs.contains(where: { $0.id == id }) else { return }
-        for tab in tabs where tab.id != id {
+        let closingIDs = Set(tabs.filter { $0.id != id && !$0.isPinned }.map(\.id))
+        for tab in tabs where closingIDs.contains(tab.id) {
             rememberClosedTab(tab)
         }
-        tabs.removeAll { $0.id != id }
+        tabs.removeAll { closingIDs.contains($0.id) }
         activeTabID = id
     }
 
+    /// Closes the tabs after one, except pinned ones.
     func closeTabs(after id: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
-        let closingTabs = tabs[(index + 1)...]
+        let closingTabs = tabs[(index + 1)...].filter { !$0.isPinned }
         closingTabs.forEach(rememberClosedTab)
         let closingIDs = Set(closingTabs.map(\.id))
         tabs.removeAll { closingIDs.contains($0.id) }
@@ -170,7 +245,7 @@ final class BrowserModel {
         tab.stopWaitingForSelection()
         let isBlank = tab.isNewTab || tab.url == nil
         closedTabs.append(ClosedTab(url: isBlank ? nil : tab.url, title: tab.pageTitle,
-                                    interactionState: isBlank ? nil : tab.interactionState))
+                                    interactionState: isBlank ? nil : tab.interactionState, isPinned: tab.isPinned))
         if closedTabs.count > 10 { closedTabs.removeFirst() }
     }
 
@@ -184,11 +259,12 @@ final class BrowserModel {
         let tab = adopt(BrowserTab(url: closedTab.url, title: closedTab.title,
                                    interactionState: closedTab.interactionState))
         tabs.append(tab)
+        if closedTab.isPinned { setPinned(true, for: tab.id) }
         activeTabID = tab.id
     }
 
-    /// Opens a tab after the opener and any tabs it opened before, like a page's pop-up or a ⌘-clicked link.
-    /// Pass WebKit's configuration for a pop-up, or a request to load.
+    /// Opens a tab after the opener and any tabs it opened before, like a page's pop-up or a ⌘-clicked link. A pinned
+    /// opener's tabs open first after the pinned tabs. Pass WebKit's configuration for a pop-up, or a request to load.
     @discardableResult
     func openChildTab(of opener: BrowserTab, configuration: WKWebViewConfiguration? = nil,
                       loading request: URLRequest? = nil, select: Bool) -> BrowserTab {
@@ -198,7 +274,7 @@ final class BrowserModel {
         tab.isPopUp = configuration != nil
         // Background tabs lay out at the size they'll be shown at.
         tab.contentView.frame = opener.contentView.frame
-        var index = (tabs.firstIndex { $0.id == opener.id } ?? tabs.count - 1) + 1
+        var index = max((tabs.firstIndex { $0.id == opener.id } ?? tabs.count - 1) + 1, pinnedCount)
         while tabs.indices.contains(index), tabs[index].openerID == opener.id {
             index += 1
         }
@@ -284,19 +360,24 @@ final class BrowserModel {
         WindowSession(tabs: tabs.map { tab in
             let isBlank = tab.isNewTab || tab.url == nil
             return TabSession(url: isBlank ? nil : tab.url, title: tab.pageTitle,
-                              interactionState: isBlank ? nil : tab.interactionState as? Data)
-        }, selectedIndex: tabs.firstIndex { $0.id == activeTabID } ?? 0)
+                              interactionState: isBlank ? nil : tab.interactionState as? Data, isPinned: tab.isPinned)
+        }, selectedIndex: tabs.firstIndex { $0.id == activeTabID } ?? 0, profileID: profileID)
     }
 
     /// Replaces the window's tabs with a saved window's. They start suspended, so only the selected tab loads.
+    /// Pinned tabs come first, even from a file that saved them elsewhere.
     func restoreSession(_ session: WindowSession) {
         guard !session.tabs.isEmpty else { return }
         tabs.forEach { $0.stopWaitingForSelection() }
-        tabs = session.tabs.map { tab in
-            tab.url == nil ? makeTab()
-                : adopt(BrowserTab(url: tab.url, title: tab.title, interactionState: tab.interactionState))
+        let restored = session.tabs.map { saved in
+            let tab = saved.url == nil ? makeTab()
+                : adopt(BrowserTab(url: saved.url, title: saved.title, interactionState: saved.interactionState))
+            tab.isPinned = saved.isPinned
+            return tab
         }
-        activeTabID = tabs[min(max(session.selectedIndex, 0), tabs.count - 1)].id
+        let selectedID = restored[min(max(session.selectedIndex, 0), restored.count - 1)].id
+        tabs = restored.filter(\.isPinned) + restored.filter { !$0.isPinned }
+        activeTabID = selectedID
     }
 
     // MARK: Find
@@ -401,27 +482,5 @@ final class BrowserModel {
             guard !(await tab.isPlayingMedia()), suspendableTabs.contains(where: { $0 === tab }) else { continue }
             tab.suspend()
         }
-    }
-}
-
-enum BrowserAddress {
-    static func url(for input: String, searchEngine: SearchEngine = .current) -> URL? {
-        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-
-        if let url = URL(string: text),
-           ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-           url.host() != nil {
-            return url
-        }
-
-        if !text.contains(where: \.isWhitespace),
-           (text.contains(".") || text == "localhost"),
-           let url = URL(string: "https://\(text)"),
-           url.host() != nil {
-            return url
-        }
-
-        return searchEngine.searchURL(for: text)
     }
 }

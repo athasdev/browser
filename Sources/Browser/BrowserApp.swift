@@ -1,58 +1,61 @@
 import AppKit
 import SwiftUI
+import SystemConfiguration
 
 @main
 struct BrowserApp: App {
     static let windowID = "browser"
     static let privateWindowID = "private"
+    static let bookmarksWindowID = "bookmarks"
 
     @NSApplicationDelegateAdaptor(BrowserAppDelegate.self) private var appDelegate
-    @State private var bookmarks = BookmarkStore()
     @State private var downloads = DownloadManager()
-    @State private var history: HistoryStore
     @State private var session: SessionStore
-    @State private var browsingData: BrowsingData
+    @State private var profiles: ProfileStore
 
+    /// Unit tests run inside the app, which then shouldn't reopen or overwrite the user's windows, profiles, and
+    /// history.
     init() {
-        let history = HistoryStore(file: Self.storeFile(named: "History.plist"))
-        let session = SessionStore(file: Self.storeFile(named: "Session.plist"),
-                                   restoresWindows: SessionPreferences.restoresWindows)
-        _history = State(initialValue: history)
-        _session = State(initialValue: session)
-        _browsingData = State(initialValue: BrowsingData(history: history, session: session))
-    }
-
-    /// Unit tests run inside the app, which then shouldn't reopen or overwrite the user's windows and history.
-    private static func storeFile(named name: String) -> StoreFile? {
         let isRunningTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-        return isRunningTests ? nil : .applicationSupport(named: name)
+        let session = SessionStore(file: isRunningTests ? nil : .applicationSupport(named: "Session.plist"),
+                                   restoresWindows: SessionPreferences.restoresWindows)
+        _session = State(initialValue: session)
+        let sync = isRunningTests ? nil : CloudSync(directory: StoreFile.applicationSupportDirectory,
+                                                    deviceName: SCDynamicStoreCopyComputerName(nil, nil) as String? ?? "Mac",
+                                                    platform: "Mac")
+        _profiles = State(initialValue: ProfileStore(session: session,
+                                                     services: isRunningTests ? .inMemory : .live, sync: sync))
     }
 
     var body: some Scene {
-        WindowGroup(id: Self.windowID) {
-            BrowserWindow(bookmarks: bookmarks, downloads: downloads, history: history, session: session)
+        WindowGroup(id: Self.windowID, for: ProfileWindowRequest.self) { $request in
+            BrowserWindow(profiles: profiles, downloads: downloads, session: session, request: request)
                 .frame(minWidth: 680, minHeight: 440)
-                .environment(browsingData)
         }
         .windowStyle(.hiddenTitleBar)
         // The session store reopens the windows with their tabs, so the system doesn't reopen them too.
         .restorationBehavior(.disabled)
         .commands {
-            BrowserCommands(bookmarks: bookmarks, history: history, session: session, updater: .shared)
+            BrowserCommands(profiles: profiles, session: session, updater: .shared)
         }
 
         // A private window joins neither history nor the session, and isn't reopened.
-        WindowGroup("Private Window", id: Self.privateWindowID) {
-            BrowserWindow(bookmarks: bookmarks, downloads: downloads, history: nil, session: nil, isPrivate: true)
+        WindowGroup("Private Window", id: Self.privateWindowID, for: ProfileWindowRequest.self) { $request in
+            BrowserWindow(profiles: profiles, downloads: downloads, session: nil, request: request, isPrivate: true)
                 .frame(minWidth: 680, minHeight: 440)
-                .environment(browsingData)
         }
         .windowStyle(.hiddenTitleBar)
         .restorationBehavior(.disabled)
 
+        // One window per profile, which a second request brings to the front.
+        WindowGroup("Bookmarks", id: Self.bookmarksWindowID, for: UUID.self) { $profileID in
+            ManageBookmarksWindow(profiles: profiles, profileID: profileID ?? profiles.defaultProfileID)
+        }
+        .restorationBehavior(.disabled)
+        .defaultSize(width: 720, height: 520)
+
         Settings {
-            SettingsView(browsingData: browsingData, contentBlocker: .shared, sitePermissions: .shared,
-                         zoomLevels: .shared, passwords: .shared, passkeys: .shared, updater: .shared)
+            SettingsView(profiles: profiles, passkeys: .shared, updater: .shared)
         }
     }
 }
@@ -69,18 +72,47 @@ extension FocusedValues {
 }
 
 private struct BrowserCommands: Commands {
-    let bookmarks: BookmarkStore
-    let history: HistoryStore
+    let profiles: ProfileStore
     let session: SessionStore
     let updater: AppUpdater
     @FocusedValue(\.browserModel) private var browser
     @Environment(\.openWindow) private var openWindow
     @AppStorage(BookmarksBarVisibility.storageKey) private var bookmarksBarVisibility = BookmarksBarVisibility.always
     @AppStorage(TabLayout.storageKey) private var tabLayout = TabLayout.horizontal
+    @AppStorage(TabLayout.hiddenStorageKey) private var tabsHidden = false
+
+    /// The focused window's profile, or the one that opened it if it's private, or else the default profile.
+    private var profile: ProfileData {
+        profiles.data(for: browser?.profileID ?? browser?.openerProfileID)
+    }
+
+    private var bookmarks: BookmarkStore {
+        browser?.bookmarks ?? profile.bookmarks
+    }
+
+    private var history: HistoryStore {
+        profile.history
+    }
+
+    private func newWindow(in profileID: UUID?) {
+        openWindow(id: BrowserApp.windowID,
+                   value: ProfileWindowRequest(profileID: profileID ?? profiles.defaultProfileID))
+    }
 
     private var bookmarkableTab: BrowserTab? {
         guard let tab = browser?.activeTab, !tab.isNewTab, tab.url != nil else { return nil }
         return tab
+    }
+
+    /// What the active page's site is told about the browser. Changing it reloads the page to tell it again.
+    private var siteIdentity: Binding<BrowserIdentity> {
+        Binding {
+            browser?.compatibility.identity(for: pageTab?.url) ?? .safari
+        } set: { identity in
+            guard let browser, let tab = pageTab else { return }
+            browser.compatibility.setIdentity(identity, for: tab.url)
+            browser.reloadTab(tab.id)
+        }
     }
 
     private var pageTab: BrowserTab? {
@@ -96,16 +128,32 @@ private struct BrowserCommands: Commands {
             }
         }
         CommandGroup(replacing: .newItem) {
-            Button("New Window") { openWindow(id: BrowserApp.windowID) }
+            Button("New Window") { newWindow(in: profile.id) }
                 .keyboardShortcut("n", modifiers: .command)
-            Button("New Private Window") { openWindow(id: BrowserApp.privateWindowID) }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
+            Menu("New Window in Profile") {
+                // The first nine profiles have shortcuts, like tabs do.
+                ForEach(Array(profiles.profiles.prefix(9).enumerated()), id: \.element.id) { index, profile in
+                    Button(profile.displayName) { newWindow(in: profile.id) }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command, .option])
+                }
+                ForEach(profiles.profiles.dropFirst(9)) { profile in
+                    Button(profile.displayName) { newWindow(in: profile.id) }
+                }
+            }
+            Button("New Private Window") {
+                openWindow(id: BrowserApp.privateWindowID, value: ProfileWindowRequest(profileID: profile.id))
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
             Button("New Tab") { browser?.addTab() }
                 .keyboardShortcut("t", modifiers: .command)
             Button("Reopen Closed Tab") { browser?.reopenClosedTab() }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
             Button("Close Tab") { browser?.closeActiveTab() }
                 .keyboardShortcut("w", modifiers: .command)
+        }
+        CommandGroup(replacing: .importExport) {
+            Button("Import From Browser…") { browser?.isShowingImport = true }
+                .disabled(browser == nil)
         }
         CommandGroup(replacing: .printItem) {
             Button("Print…") { browser?.printActivePage() }
@@ -154,6 +202,14 @@ private struct BrowserCommands: Commands {
             }
             Button("Select Last Tab") { browser?.selectLastTab() }
                 .keyboardShortcut("9", modifiers: .command)
+
+            Divider()
+
+            Button(browser?.activeTab?.isPinned == true ? "Unpin Tab" : "Pin Tab") {
+                guard let browser, let tab = browser.activeTab else { return }
+                browser.setPinned(!tab.isPinned, for: tab.id)
+            }
+            .disabled(browser?.activeTab == nil)
         }
         CommandGroup(after: .toolbar) {
             Button("Open Location") { browser?.requestAddressFocus() }
@@ -170,12 +226,30 @@ private struct BrowserCommands: Commands {
             Button("Zoom Out") { browser?.zoomOut() }
                 .keyboardShortcut("-", modifiers: .command)
                 .disabled(!(browser?.canZoom ?? false))
+            Divider()
+            Picker("Website Compatibility", selection: siteIdentity) {
+                ForEach(BrowserIdentity.allCases) { identity in
+                    Text(identity.title).tag(identity)
+                }
+            }
+            .disabled(browser?.isPrivate != false || SiteCompatibility.site(of: pageTab?.url) == nil)
+            Menu("Open Page In") {
+                ForEach(OtherBrowsers.installed()) { app in
+                    Button(app.name) {
+                        if let url = pageTab?.url { OtherBrowsers.open(url, in: app) }
+                    }
+                }
+            }
+            .disabled(pageTab?.url == nil)
         }
         CommandGroup(after: .sidebar) {
             Button(tabLayout == .vertical ? "Use Horizontal Tabs" : "Use Vertical Tabs") {
                 tabLayout = tabLayout.toggled
+                tabsHidden = false
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
+            Button(tabsHidden ? "Show Tabs" : "Hide Tabs") { tabsHidden.toggle() }
+                .keyboardShortcut("s", modifiers: .command)
             Divider()
             Picker("Bookmarks Bar", selection: $bookmarksBarVisibility) {
                 ForEach(BookmarksBarVisibility.allCases) { visibility in
@@ -196,8 +270,8 @@ private struct BrowserCommands: Commands {
             Divider()
             Button("Reopen All Windows from Last Session") {
                 // A private window can't take the restored tabs.
-                for _ in 0..<session.reopenLastSession(reusing: browser?.isPrivate == true ? nil : browser) {
-                    openWindow(id: BrowserApp.windowID)
+                for profileID in session.reopenLastSession(reusing: browser?.isPrivate == true ? nil : browser) {
+                    newWindow(in: profileID)
                 }
             }
             .disabled(session.reopenableWindows.isEmpty)
@@ -210,6 +284,21 @@ private struct BrowserCommands: Commands {
                 }
             }
 
+            if let devices = profiles.sync?.otherDevices[profile.id], !devices.isEmpty {
+                Divider()
+                Menu("Tabs on Other Devices") {
+                    ForEach(devices) { device in
+                        Section(device.name) {
+                            ForEach(device.tabs, id: \.self) { tab in
+                                Button(Self.menuTitle(tab.title.isEmpty ? tab.url.absoluteString : tab.title)) {
+                                    browser?.open(tab.url, inNewTab: true)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Divider()
             Button("Show All History") { browser?.isShowingHistory.toggle() }
                 .keyboardShortcut("y", modifiers: .command)
@@ -218,18 +307,20 @@ private struct BrowserCommands: Commands {
                 .disabled(browser == nil)
         }
         CommandMenu("Bookmarks") {
-            Button(bookmarks.isBookmarked(bookmarkableTab?.url) ? "Remove Bookmark" : "Bookmark This Page") {
-                guard let tab = bookmarkableTab, let url = tab.url else { return }
-                bookmarks.toggle(title: tab.pageTitle, url: url)
+            Button(bookmarks.isBookmarked(bookmarkableTab?.url) ? "Edit Bookmark…" : "Bookmark This Page…") {
+                browser?.isEditingBookmark = true
             }
             .keyboardShortcut("d", modifiers: .command)
             .disabled(bookmarkableTab == nil)
+            Button("Manage Bookmarks") {
+                openWindow(id: BrowserApp.bookmarksWindowID, value: profile.id)
+            }
+            .keyboardShortcut("b", modifiers: [.command, .option])
 
-            if !bookmarks.bookmarks.isEmpty {
+            if !bookmarks.root.isEmpty {
                 Divider()
-                ForEach(bookmarks.bookmarks) { bookmark in
-                    Button(bookmark.displayTitle) { browser?.open(bookmark.url) }
-                }
+                BookmarkMenuItems(nodes: bookmarks.root, open: { browser?.open($0) },
+                                  openAll: { browser?.openInNewTabs($0.map(\.url)) }, offersOpenAll: false)
             }
         }
         #if DEBUG

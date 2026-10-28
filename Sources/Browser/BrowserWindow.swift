@@ -10,8 +10,10 @@ private struct AddressBarFrameKey: PreferenceKey {
 }
 
 struct BrowserWindow: View {
-    let bookmarks: BookmarkStore
+    let profiles: ProfileStore
     let session: SessionStore?
+    /// Pages the window opens once it appears, such as a bookmark opened in a new window.
+    private let initialURLs: [URL]
     @State private var browser: BrowserModel
     @State private var address = ""
     /// What the user typed, without the inline completion.
@@ -25,31 +27,57 @@ struct BrowserWindow: View {
     @State private var addressIsFocused = false
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
-    @Environment(BrowsingData.self) private var browsingData
     @AppStorage(BookmarksBarVisibility.storageKey) private var bookmarksBarVisibility = BookmarksBarVisibility.always
     @AppStorage(TabLayout.storageKey) private var tabLayout = TabLayout.horizontal
+    @AppStorage(TabLayout.hiddenStorageKey) private var tabsHidden = false
 
-    private let contentBlocker = ContentBlocker.shared
-
-    private var accent: Color {
-        browser.isPrivate ? Color(red: 0.58, green: 0.50, blue: 0.86) : Color(red: 0.38, green: 0.49, blue: 0.54)
+    private var bookmarks: BookmarkStore {
+        browser.bookmarks
     }
 
-    /// Pass `nil` for the history and session of a window whose pages aren't remembered. A private window keeps
-    /// its cookies and site data apart from other windows, and only until it closes.
-    init(bookmarks: BookmarkStore, downloads: DownloadManager, history: HistoryStore?, session: SessionStore?,
-         isPrivate: Bool = false) {
-        self.bookmarks = bookmarks
+    private var contentBlocker: ContentBlocker {
+        browser.contentBlocker
+    }
+
+    /// The active page, when it's a web page another device's browser can open.
+    private var handoffURL: URL? {
+        guard let tab = browser.activeTab, !tab.isNewTab, tab.loadError == nil, let url = tab.url,
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        return url
+    }
+
+    /// The window's profile, or the one that opened a private window.
+    private var profile: BrowserProfile {
+        profiles.profile(for: browser) ?? profiles.defaultProfile
+    }
+
+    /// The profile's history and website data, which History ▸ Clear History and Website Data clears.
+    private var browsingData: BrowsingData {
+        profiles.data(for: profile.id).browsingData
+    }
+
+    private var accent: Color {
+        browser.isPrivate ? Color(red: 0.58, green: 0.50, blue: 0.86) : profile.color.color
+    }
+
+    /// Opens in the requested profile, or else the profile of the saved window it's about to restore, or the default
+    /// profile. A private window keeps its cookies and site data apart from other windows, and only until it closes;
+    /// its request names the profile that opened it.
+    init(profiles: ProfileStore, downloads: DownloadManager, session: SessionStore?,
+         request: ProfileWindowRequest? = nil, isPrivate: Bool = false) {
+        self.profiles = profiles
         self.session = isPrivate ? nil : session
-        _browser = State(initialValue: isPrivate ? .makePrivate(downloads: downloads)
-                                                 : BrowserModel(downloads: downloads, history: history,
-                                                                passwords: .shared))
+        initialURLs = request?.urls ?? []
+        let profileID = request?.profileID ?? (isPrivate ? nil : session?.nextPendingProfileID)
+        let profile = profiles.data(for: profileID)
+        _browser = State(initialValue: isPrivate ? .makePrivate(downloads: downloads, openedFrom: profile)
+                                                 : BrowserModel(profile: profile, downloads: downloads))
     }
 
     var body: some View {
         // The main column keeps one identity across layouts, so switching layouts doesn't rebuild the page host.
         HStack(spacing: 0) {
-            if tabLayout == .vertical {
+            if tabLayout == .vertical && !tabsHidden {
                 TabStrip(browser: browser, layout: .vertical, isFullScreen: isFullScreen,
                          hoverCardTabID: $hoverCardTabID)
                     .privateChrome(browser.isPrivate)
@@ -57,7 +85,7 @@ struct BrowserWindow: View {
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             VStack(spacing: 0) {
-                if tabLayout == .horizontal {
+                if tabLayout == .horizontal && !tabsHidden {
                     TabStrip(browser: browser, layout: .horizontal, isFullScreen: isFullScreen,
                              hoverCardTabID: $hoverCardTabID)
                         .privateChrome(browser.isPrivate)
@@ -77,24 +105,42 @@ struct BrowserWindow: View {
         .animation(.easeOut(duration: 0.18), value: bookmarksBarVisibility)
         .animation(.easeOut(duration: 0.18), value: browser.activeTab?.isNewTab)
         .animation(.snappy(duration: 0.25), value: tabLayout)
+        .animation(.snappy(duration: 0.25), value: tabsHidden)
         .onChange(of: tabLayout) { _, _ in hoverCardTabID = nil }
+        .onChange(of: tabsHidden) { _, _ in hoverCardTabID = nil }
         .background {
             WindowGlassBackground(isDark: browser.isPrivate)
             if browser.isPrivate {
                 BrowserChrome.privateTint.ignoresSafeArea()
+            } else if profiles.profiles.count > 1 {
+                // Tells profiles' windows apart at a glance.
+                profile.color.color.opacity(0.12).ignoresSafeArea()
             }
         }
-        .background(WindowChromeConfigurator(titlebarHeight: BrowserChrome.titlebarHeight(for: tabLayout),
+        .background(WindowChromeConfigurator(titlebarHeight: tabsHidden ? BrowserChrome.navigationBarHeight
+                                                                         : BrowserChrome.titlebarHeight(for: tabLayout),
                                              isFullScreen: $isFullScreen,
                                              onWindowChange: { [browser] in browser.window = $0 }) {
             session?.detach(browser)
+            browser.extensions?.didCloseWindow(browser)
+            browser.onTabsChange?()
         })
         .ignoresSafeArea(.container, edges: .top)
         .tint(accent)
         .focusedSceneValue(\.browserModel, browser)
+        // Hands the page off to a nearby iPhone, iPad, or Mac. Private windows don't.
+        .userActivity(NSUserActivityTypeBrowsingWeb, element: browser.isPrivate ? nil : handoffURL) { url, activity in
+            activity.webpageURL = url
+            activity.title = browser.activeTab?.pageTitle
+            activity.isEligibleForHandoff = true
+        }
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            if let url = activity.webpageURL, ExternalURLRouter.canOpen(url) { browser.open(url, inNewTab: !browser.isBlank) }
+        }
         .onChange(of: browser.activeTabID) { _, _ in
             address = browser.activeTab?.url?.absoluteString ?? ""
             closeSuggestions()
+            browser.isEditingBookmark = false
         }
         .onChange(of: addressIsFocused) { _, isFocused in
             guard !isFocused else { return }
@@ -107,6 +153,9 @@ struct BrowserWindow: View {
         .sheet(isPresented: $browser.isShowingClearData) {
             ClearDataView(data: browsingData)
         }
+        .sheet(isPresented: $browser.isShowingImport) {
+            BrowserImportView(profiles: profiles, profileID: profile.id)
+        }
         .sheet(isPresented: $browser.isShowingHistory) {
             if let history = browser.history {
                 HistoryView(history: history) { url, inNewTab in
@@ -116,12 +165,18 @@ struct BrowserWindow: View {
             }
         }
         .onAppear {
+            profiles.register(browser)
+            browser.extensions?.didOpenWindow(browser)
             if let session {
-                for _ in 0..<session.attach(browser) {
-                    openWindow(id: BrowserApp.windowID)
+                for profileID in session.attach(browser) {
+                    openWindow(id: BrowserApp.windowID,
+                               value: ProfileWindowRequest(profileID: profileID ?? profiles.defaultProfileID))
                 }
             }
             ExternalURLRouter.shared.register(browser, openWindow: openWindow)
+            if !initialURLs.isEmpty {
+                browser.openInNewTabs(initialURLs)
+            }
             if browser.activeTab?.isNewTab == true {
                 browser.requestAddressFocus()
             }
@@ -217,12 +272,16 @@ struct BrowserWindow: View {
     }
 
     /// Navigation, bookmarks, and the page. In the vertical layout the sidebar supplies the leading inset.
+    /// With the tabs hidden, the navigation bar is the top row and makes room for the window controls.
     private var mainColumn: some View {
-        let leadingInset = tabLayout == .vertical ? 0 : BrowserChrome.edgeInset
+        let leadingInset = tabLayout == .vertical && !tabsHidden ? 0 : BrowserChrome.edgeInset
+        let navigationLeading = tabsHidden && !isFullScreen
+            ? BrowserChrome.windowButtonsTrailing(titlebarHeight: BrowserChrome.navigationBarHeight) + 8
+            : leadingInset
 
         return VStack(spacing: 0) {
             navigationBar
-                .padding(.leading, leadingInset)
+                .padding(.leading, navigationLeading)
                 .privateChrome(browser.isPrivate)
 
             if bookmarksBarVisibility.isVisible(onNewTab: browser.activeTab?.isNewTab ?? true) {
@@ -278,7 +337,10 @@ struct BrowserWindow: View {
         PageHost(content: tab.contentView)
             .overlay {
                 if let error = tab.loadError {
-                    PageErrorView(error: error, isLoading: tab.isLoading) { tab.retry() }
+                    PageErrorView(error: error, isLoading: tab.isLoading,
+                                  otherBrowser: error.kind == .crashed ? OtherBrowsers.installed().first : nil) {
+                        tab.retry()
+                    }
                 }
             }
             .overlay(alignment: .topTrailing) {
@@ -351,6 +413,8 @@ struct BrowserWindow: View {
 
             if browser.isPrivate {
                 privateLabel
+            } else {
+                ProfileMenu(profiles: profiles, current: profile)
             }
 
             HStack(spacing: 7) {
@@ -362,6 +426,8 @@ struct BrowserWindow: View {
                              focusRequest: browser.addressFocusRequest, blurRequest: addressBlurRequest,
                              edit: editAddress, perform: performAddressCommand)
                 zoomButton
+                compatibilityButton
+                chromeWebStoreButton
                 passwordButton
                 trackerBlockingButton
                 bookmarkButton
@@ -377,6 +443,10 @@ struct BrowserWindow: View {
             }
             .anchorPreference(key: AddressBarFrameKey.self, value: .bounds) { $0 }
 
+            if let extensions = browser.extensions, !extensions.installed.isEmpty {
+                ExtensionToolbar(store: extensions, browser: browser)
+            }
+
             if !browser.downloads.items.isEmpty {
                 DownloadsButton(downloads: browser.downloads)
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
@@ -385,6 +455,44 @@ struct BrowserWindow: View {
         .padding(.trailing, BrowserChrome.edgeInset)
         .frame(height: BrowserChrome.navigationBarHeight)
         .animation(.snappy(duration: 0.2), value: browser.downloads.items.isEmpty)
+    }
+
+    /// Shows that the page's site is told it's in another browser, and changes or resets that.
+    @ViewBuilder
+    private var compatibilityButton: some View {
+        if let tab = browser.activeTab, !tab.isNewTab, case let identity = browser.compatibility.identity(for: tab.url),
+           identity != .safari {
+            Menu {
+                ForEach(BrowserIdentity.allCases) { option in
+                    Button {
+                        browser.compatibility.setIdentity(option, for: tab.url)
+                        browser.reloadTab(tab.id)
+                    } label: {
+                        if option == identity { Label(option.title, systemImage: "checkmark") } else { Text(option.title) }
+                    }
+                }
+            } label: {
+                Text(identity.shortTitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .padding(.horizontal, 6)
+                    .frame(height: 20)
+                    .background(Color.primary.opacity(0.08), in: Capsule())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .foregroundStyle(.secondary)
+            .disabled(browser.isPrivate)
+            .help("This site is told it’s in \(identity.shortTitle)")
+        }
+    }
+
+    /// On a Chrome Web Store page, offers to add the extension it shows.
+    @ViewBuilder
+    private var chromeWebStoreButton: some View {
+        if let extensions = browser.extensions, let storeID = ChromeWebStore.extensionID(from: browser.activeTab?.url) {
+            ChromeWebStoreButton(store: extensions, storeID: storeID, window: browser.window)
+        }
     }
 
     @ViewBuilder
@@ -405,15 +513,21 @@ struct BrowserWindow: View {
         }
     }
 
+    /// Names the profile that opened the window once there's more than one, though the window belongs to none.
     private var privateLabel: some View {
-        Label("Private", systemImage: "eyeglasses")
+        let opener = browser.openerProfileID != nil && profiles.profiles.count > 1 ? profile.displayName : nil
+
+        return Label(opener.map { "Private · \($0)" } ?? "Private", systemImage: "eyeglasses")
             .font(.system(size: 12, weight: .semibold))
+            .lineLimit(1)
             .foregroundStyle(accent)
             .padding(.horizontal, 10)
             .frame(height: 34)
             .background(accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .help("Private Window: history, cookies, and website data aren’t kept after it closes")
-            .accessibilityLabel("Private Window")
+            .help(opener.map { "Private Window, opened from \($0): history, cookies, and website data aren’t kept "
+                                + "after it closes" }
+                  ?? "Private Window: history, cookies, and website data aren’t kept after it closes")
+            .accessibilityLabel(opener.map { "Private Window, opened from \($0)" } ?? "Private Window")
     }
 
     /// Shows whether trackers are blocked on the page's site, and turns blocking off for the site. A private window
@@ -478,14 +592,19 @@ struct BrowserWindow: View {
     private var bookmarkButton: some View {
         if let tab = browser.activeTab, !tab.isNewTab, let url = tab.url {
             let isBookmarked = bookmarks.isBookmarked(url)
-            Button { bookmarks.toggle(title: tab.pageTitle, url: url) } label: {
+            Button { browser.isEditingBookmark = true } label: {
                 Image(systemName: isBookmarked ? "star.fill" : "star")
                     .foregroundStyle(isBookmarked ? Color.yellow : Color.secondary)
                     .contentTransition(.symbolEffect(.replace))
             }
             .buttonStyle(ChromeIconButtonStyle(size: 26))
-            .help(isBookmarked ? "Remove Bookmark (⌘D)" : "Bookmark This Page (⌘D)")
-            .accessibilityLabel(isBookmarked ? "Remove Bookmark" : "Bookmark This Page")
+            .help(isBookmarked ? "Edit Bookmark (⌘D)" : "Bookmark This Page (⌘D)")
+            .accessibilityLabel(isBookmarked ? "Edit Bookmark" : "Bookmark This Page")
+            .popover(isPresented: $browser.isEditingBookmark, arrowEdge: .bottom) {
+                BookmarkEditor(bookmarks: bookmarks, title: tab.pageTitle, url: url) {
+                    browser.isEditingBookmark = false
+                }
+            }
         }
     }
 

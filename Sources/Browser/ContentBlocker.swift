@@ -2,16 +2,16 @@ import Foundation
 import Observation
 import WebKit
 
-/// Blocks the trackers in `TrackerBlocklist` in every web view. The rule list is compiled off the main thread once,
-/// and kept in WebKit's rule list store between launches until the list or the sites where blocking is off change.
+/// Blocks the trackers in `TrackerBlocklist` in a profile's web views. The rule list is compiled off the main thread
+/// once, and kept in WebKit's rule list store between launches until the list or the sites where blocking is off
+/// change. Each profile has its own sites where blocking is off, so its own rule list; blocking is on or off for all.
 @MainActor
 @Observable
 final class ContentBlocker {
-    static let shared = ContentBlocker(defaults: .standard, store: .default())
     static let enabledKey = "blocksTrackers"
-    private static let exceptionsKey = "trackerBlockingExceptions"
-    private static let signatureKey = "trackerRuleListSignature"
-    private static let identifier = "Trackers"
+    nonisolated static let exceptionsKey = "trackerBlockingExceptions"
+    nonisolated static let signatureKey = "trackerRuleListSignature"
+    nonisolated static let ruleListIdentifier = "Trackers"
 
     private(set) var isEnabled: Bool
     /// Sites where blocking is off, along with their subdomains. Stored without "www.".
@@ -21,13 +21,21 @@ final class ContentBlocker {
     @ObservationIgnored private var ruleList: WKContentRuleList?
     @ObservationIgnored private let controllers = NSHashTable<WKUserContentController>.weakObjects()
     @ObservationIgnored private var loading: Task<Void, Never>?
+    @ObservationIgnored private let exceptionsKey: String
+    @ObservationIgnored private let signatureKey: String
+    @ObservationIgnored private let identifier: String
 
-    /// Pass `nil` defaults to keep the settings in memory only, and a `nil` store to never block anything.
-    init(defaults: UserDefaults? = nil, store: WKContentRuleListStore? = nil) {
+    /// Pass `nil` defaults to keep the settings in memory only, and a `nil` store to never block anything. A profile
+    /// saves its exceptions under its key prefix, and its rule list under its own identifier.
+    init(defaults: UserDefaults? = nil, store: WKContentRuleListStore? = nil, keyPrefix: String = "",
+         ruleListIdentifier: String = ContentBlocker.ruleListIdentifier) {
         self.defaults = defaults
         self.store = store
+        exceptionsKey = keyPrefix + Self.exceptionsKey
+        signatureKey = keyPrefix + Self.signatureKey
+        identifier = ruleListIdentifier
         isEnabled = defaults?.object(forKey: Self.enabledKey) as? Bool ?? true
-        exceptions = defaults?.stringArray(forKey: Self.exceptionsKey) ?? []
+        exceptions = defaults?.stringArray(forKey: exceptionsKey) ?? []
         if store != nil { loadRuleList() }
     }
 
@@ -76,7 +84,7 @@ final class ContentBlocker {
     }
 
     private func saveExceptions() async {
-        defaults?.set(exceptions, forKey: Self.exceptionsKey)
+        defaults?.set(exceptions, forKey: exceptionsKey)
         await loadRuleList().value
     }
 
@@ -106,16 +114,16 @@ final class ContentBlocker {
         guard let store else { return }
         let exceptions = exceptions
         let signature = Self.signature(exceptions: exceptions)
-        if ruleList != nil, defaults?.string(forKey: Self.signatureKey) == signature { return }
-        if defaults?.string(forKey: Self.signatureKey) == signature,
-           let list = try? await store.contentRuleList(forIdentifier: Self.identifier) {
+        if ruleList != nil, defaults?.string(forKey: signatureKey) == signature { return }
+        if defaults?.string(forKey: signatureKey) == signature,
+           let list = try? await store.contentRuleList(forIdentifier: identifier) {
             install(list)
             return
         }
         let encoded = await Self.encodedRules(exceptions: exceptions)
-        guard let list = try? await store.compileContentRuleList(forIdentifier: Self.identifier,
+        guard let list = try? await store.compileContentRuleList(forIdentifier: identifier,
                                                                  encodedContentRuleList: encoded) else { return }
-        defaults?.set(signature, forKey: Self.signatureKey)
+        defaults?.set(signature, forKey: signatureKey)
         install(list)
     }
 

@@ -55,6 +55,25 @@ protocol PasswordStorage: AnyObject {
     func remove(_ account: SavedPassword) throws
 }
 
+extension PasswordStorage {
+    /// Removes every saved sign-in, for when a profile is deleted.
+    func removeAll() throws {
+        for account in try savedPasswords() {
+            try remove(account)
+        }
+    }
+}
+
+/// Keeps passwords in memory only, for when the app runs its unit tests.
+final class InMemoryPasswordStorage: PasswordStorage {
+    private var items: [SavedPassword: String] = [:]
+
+    func savedPasswords() throws -> [SavedPassword] { Array(items.keys) }
+    func password(for account: SavedPassword) throws -> String? { items[account] }
+    func save(_ password: String, for account: SavedPassword) throws { items[account] = password }
+    func remove(_ account: SavedPassword) throws { items[account] = nil }
+}
+
 enum PasswordStorageError: Error {
     case keychain(OSStatus)
 }
@@ -62,14 +81,20 @@ enum PasswordStorageError: Error {
 /// Keeps passwords as internet password items in the login keychain, which only this app can read without asking.
 /// The data protection keychain would need a provisioning profile in every build.
 final class KeychainPasswordStorage: PasswordStorage {
-    /// Marks the items this app saves, so it never lists or reads another app's.
-    private static let itemDescription = "Browser website password"
+    /// Marks the items this app saves, so it never lists or reads another app's. Each profile but the original one
+    /// adds its ID, so profiles never see each other's passwords.
+    nonisolated static let itemDescription = "Browser website password"
+    private let itemDescription: String
+
+    init(itemDescription: String = KeychainPasswordStorage.itemDescription) {
+        self.itemDescription = itemDescription
+    }
 
     private func query(for origin: PasswordOrigin? = nil, username: String? = nil) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
             kSecAttrProtocol as String: kSecAttrProtocolHTTPS,
-            kSecAttrDescription as String: Self.itemDescription,
+            kSecAttrDescription as String: itemDescription,
         ]
         if let origin {
             query[kSecAttrServer as String] = origin.host
@@ -125,13 +150,13 @@ final class KeychainPasswordStorage: PasswordStorage {
     }
 }
 
-/// Saves the passwords the user signs in with, and fills them back in when asked. Private windows have none.
+/// Saves the passwords the user signs in with, and fills them back in when asked. Each profile has its own; private
+/// windows have none.
 @MainActor
 @Observable
 final class PasswordManager {
-    static let shared = PasswordManager(storage: KeychainPasswordStorage(), defaults: .standard)
-    static let offersToSaveKey = "offersToSavePasswords"
-    private static let neverSaveKey = "neverSavePasswordSites"
+    nonisolated static let offersToSaveKey = "offersToSavePasswords"
+    nonisolated static let neverSaveKey = "neverSavePasswordSites"
 
     enum Offer: Equatable {
         case save
@@ -144,18 +169,22 @@ final class PasswordManager {
     /// Sites the user asked never to save passwords for, as origins.
     private(set) var neverSaveSites: [String]
     var offersToSave: Bool {
-        didSet { defaults?.set(offersToSave, forKey: Self.offersToSaveKey) }
+        didSet { defaults?.set(offersToSave, forKey: offersToSaveKey) }
     }
     @ObservationIgnored private let storage: PasswordStorage
     @ObservationIgnored private let defaults: UserDefaults?
     @ObservationIgnored private var hasLoaded = false
+    @ObservationIgnored private let offersToSaveKey: String
+    @ObservationIgnored private let neverSaveKey: String
 
-    /// Pass `nil` defaults to keep the settings in memory only.
-    init(storage: PasswordStorage, defaults: UserDefaults? = nil) {
+    /// Pass `nil` defaults to keep the settings in memory only. A profile's settings are saved under its key prefix.
+    init(storage: PasswordStorage, defaults: UserDefaults? = nil, keyPrefix: String = "") {
         self.storage = storage
         self.defaults = defaults
-        offersToSave = defaults?.object(forKey: Self.offersToSaveKey) as? Bool ?? true
-        neverSaveSites = defaults?.stringArray(forKey: Self.neverSaveKey) ?? []
+        offersToSaveKey = keyPrefix + Self.offersToSaveKey
+        neverSaveKey = keyPrefix + Self.neverSaveKey
+        offersToSave = defaults?.object(forKey: offersToSaveKey) as? Bool ?? true
+        neverSaveSites = defaults?.stringArray(forKey: neverSaveKey) ?? []
     }
 
     func reload() {
@@ -199,15 +228,49 @@ final class PasswordManager {
         reload()
     }
 
+    struct ImportResult: Equatable {
+        var added = 0
+        /// Already saved, with the same password or a different one, which is kept.
+        var alreadySaved = 0
+        var failed = 0
+    }
+
+    /// Saves imported sign-ins that aren't saved yet. A sign-in saved with a different password keeps its password.
+    func importPasswords(_ imported: [(account: SavedPassword, password: String)]) -> ImportResult {
+        reload()
+        var result = ImportResult()
+        var known = Set(passwords)
+        for (account, password) in imported {
+            guard known.insert(account).inserted else {
+                result.alreadySaved += 1
+                continue
+            }
+            do {
+                try storage.save(password, for: account)
+                result.added += 1
+            } catch {
+                result.failed += 1
+            }
+        }
+        reload()
+        return result
+    }
+
+    /// Removes every saved password, for when the profile is deleted.
+    func removeAll() {
+        try? storage.removeAll()
+        reload()
+    }
+
     func neverSave(on origin: PasswordOrigin) {
         guard !neverSaveSites.contains(origin.description) else { return }
         neverSaveSites.append(origin.description)
         neverSaveSites.sort()
-        defaults?.set(neverSaveSites, forKey: Self.neverSaveKey)
+        defaults?.set(neverSaveSites, forKey: neverSaveKey)
     }
 
     func allowSaving(on site: String) {
         neverSaveSites.removeAll { $0 == site }
-        defaults?.set(neverSaveSites, forKey: Self.neverSaveKey)
+        defaults?.set(neverSaveSites, forKey: neverSaveKey)
     }
 }

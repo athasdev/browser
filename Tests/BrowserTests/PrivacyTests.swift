@@ -4,14 +4,22 @@ import XCTest
 
 @MainActor
 final class PrivacyTests: XCTestCase {
+    private func makeProfile() -> ProfileData {
+        ProfileStore(session: SessionStore(file: nil), services: .inMemory).data(for: nil)
+    }
+
     func testPrivateWindowsRememberNothing() throws {
-        let browser = BrowserModel.makePrivate(downloads: DownloadManager())
+        let profile = makeProfile()
+        let browser = BrowserModel.makePrivate(downloads: DownloadManager(), openedFrom: profile)
 
         XCTAssertTrue(browser.isPrivate)
         XCTAssertNil(browser.history)
+        XCTAssertNil(browser.profileID)
+        XCTAssertEqual(browser.openerProfileID, profile.id)
         XCTAssertFalse(browser.websiteDataStore.isPersistent)
-        XCTAssertFalse(browser.sitePermissions === SitePermissions.shared)
-        XCTAssertFalse(browser.zoomLevels === ZoomStore.shared)
+        XCTAssertFalse(browser.sitePermissions === profile.sitePermissions)
+        XCTAssertFalse(browser.zoomLevels === profile.zoomLevels)
+        XCTAssertTrue(browser.bookmarks === profile.bookmarks)
         XCTAssertFalse(BrowserModel().isPrivate)
     }
 
@@ -45,11 +53,12 @@ final class PrivacyTests: XCTestCase {
     }
 
     func testPrivateZoomLevelsAreForgotten() throws {
-        let browser = BrowserModel.makePrivate(downloads: DownloadManager())
+        let profile = makeProfile()
+        let browser = BrowserModel.makePrivate(downloads: DownloadManager(), openedFrom: profile)
         browser.zoomLevels.setLevel(1.5, for: "private.example")
 
         XCTAssertEqual(browser.zoomLevels.level(for: "private.example"), 1.5)
-        XCTAssertEqual(ZoomStore.shared.level(for: "private.example"), 1)
+        XCTAssertEqual(profile.zoomLevels.level(for: "private.example"), 1)
         XCTAssertEqual(BrowserModel.makePrivate(downloads: DownloadManager()).zoomLevels.level(for: "private.example"), 1)
     }
 

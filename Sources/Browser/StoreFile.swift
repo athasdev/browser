@@ -13,10 +13,13 @@ final class StoreFile: Sendable {
         self.url = url
     }
 
+    /// The app's folder in Application Support.
+    static var applicationSupportDirectory: URL {
+        URL.applicationSupportDirectory.appending(path: Bundle.main.bundleIdentifier ?? "dev.athas.browser")
+    }
+
     static func applicationSupport(named name: String) -> StoreFile {
-        StoreFile(url: URL.applicationSupportDirectory
-            .appending(path: Bundle.main.bundleIdentifier ?? "dev.athas.browser")
-            .appending(path: name))
+        StoreFile(url: applicationSupportDirectory.appending(path: name))
     }
 
     func read() async -> Data? {

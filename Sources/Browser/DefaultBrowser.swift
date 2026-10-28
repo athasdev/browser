@@ -79,6 +79,11 @@ final class ExternalURLRouter {
         browser.openInNewTabs(urls)
     }
 
+    /// Opens a new window of a profile, with the pages in tabs.
+    func openWindow(in profileID: UUID, urls: [URL]) {
+        openWindow?(id: BrowserApp.windowID, value: ProfileWindowRequest(profileID: profileID, urls: urls))
+    }
+
     func open(_ urls: [URL]) {
         let urls = urls.filter(Self.canOpen)
         guard !urls.isEmpty else { return }
