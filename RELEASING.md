@@ -64,3 +64,18 @@ WebKit only lets an app use passkeys and security keys on any website if Apple g
 ## Mac App Store
 
 The `BrowserAppStore` target builds the same app with the `APP_STORE` flag and without Sparkle, which the store replaces. It isn't automated: archive the `BrowserAppStore` scheme in Xcode and upload it from the Organizer.
+
+## iCloud sync
+
+Bookmarks and open tabs sync through the private CloudKit database in the container `iCloud.dev.athas.browser`, one
+record zone per profile. Builds with `BROWSER_ICLOUD=YES` are signed with the `-iCloud` entitlements files in
+`Config/`, which add the container, CloudKit, and push notifications; the app reads its entitlements and leaves
+CloudKit alone without them, so other builds just show sync as unavailable.
+
+1. In the Apple Developer portal, create the iCloud container `iCloud.dev.athas.browser` and enable iCloud (CloudKit)
+   and Push Notifications for `dev.athas.browser` and `dev.athas.browser.mobile`.
+2. Regenerate the provisioning profiles (Developer ID, Mac App Store, and iOS App Store) so they include the container.
+3. Build or archive with `BROWSER_ICLOUD=YES`, alongside `BROWSER_PASSKEYS=YES` when that entitlement is granted.
+4. Before the first public release, deploy the CloudKit schema from Development to Production in the CloudKit Console
+   after running a development build once: the record types are `Bookmark`, `DeviceTabs`, and `Profile`.
+
