@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#050A26"/>
+      <stop offset="0.6" stop-color="#081343"/>
+      <stop offset="1" stop-color="#0A1A5C"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="512" cy="470" r="380" gradientUnits="userSpaceOnUse">
+      <stop offset="0.55" stop-color="#2F6BFF" stop-opacity="0.55"/>
+      <stop offset="0.75" stop-color="#2F6BFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#2F6BFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb" cx="420" cy="350" r="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2F7FF"/>
+      <stop offset="0.22" stop-color="#A9CBFF"/>
+      <stop offset="0.55" stop-color="#3C78F5"/>
+      <stop offset="0.85" stop-color="#1C44C4"/>
+      <stop offset="1" stop-color="#132F95"/>
+    </radialGradient>
+    <radialGradient id="shine">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.85"/>
+      <stop offset="0.55" stop-color="#9CC4FF" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#8FBBFF" stop-opacity="0.7"/>
+    </linearGradient>
+    <linearGradient id="ray" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#B9D6FF" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#2F6BFF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="pool">
+      <stop offset="0" stop-color="#8CBCFF" stop-opacity="0.75"/>
+      <stop offset="0.45" stop-color="#2F6BFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#2F6BFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="horizon" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="1"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <clipPath id="squircle"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+    <clipPath id="orbClip"><circle cx="512" cy="470" r="230"/></clipPath>
+  </defs>
+
+  <rect x="100" y="112" width="824" height="824" rx="185" fill="#000" opacity="0.3" filter="url(#shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <g clip-path="url(#squircle)">
+    <ellipse cx="512" cy="738" rx="400" ry="150" fill="url(#pool)"/>
+    <g stroke="url(#ray)" stroke-linecap="round" fill="none">
+      <path d="M512 740 L512 930" stroke-width="6"/>
+      <path d="M500 740 L436 930" stroke-width="5"/>
+      <path d="M524 740 L588 930" stroke-width="5"/>
+      <path d="M488 740 L356 930" stroke-width="4"/>
+      <path d="M536 740 L668 930" stroke-width="4"/>
+      <path d="M474 741 L262 930" stroke-width="3.5"/>
+      <path d="M550 741 L762 930" stroke-width="3.5"/>
+      <path d="M460 742 L150 925" stroke-width="3"/>
+      <path d="M564 742 L874 925" stroke-width="3"/>
+    </g>
+    <rect x="232" y="736" width="560" height="4" rx="2" fill="url(#horizon)"/>
+
+    <circle cx="512" cy="470" r="380" fill="url(#halo)"/>
+    <circle cx="512" cy="470" r="230" fill="url(#orb)"/>
+    <g clip-path="url(#orbClip)" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="5">
+      <ellipse cx="512" cy="470" rx="88" ry="230"/>
+      <ellipse cx="512" cy="470" rx="170" ry="230"/>
+      <line x1="512" y1="240" x2="512" y2="700"/>
+      <ellipse cx="512" cy="470" rx="230" ry="58"/>
+      <ellipse cx="512" cy="346" rx="196" ry="30"/>
+      <ellipse cx="512" cy="594" rx="196" ry="30"/>
+    </g>
+    <ellipse cx="432" cy="350" rx="150" ry="95" fill="url(#shine)" transform="rotate(-30 432 350)" clip-path="url(#orbClip)"/>
+    <circle cx="512" cy="470" r="229" fill="none" stroke="url(#rim)" stroke-width="3"/>
+  </g>
+</svg>
