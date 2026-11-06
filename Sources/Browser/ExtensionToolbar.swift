@@ -39,10 +39,12 @@ struct ExtensionToolbar: View {
             } label: {
                 Image(systemName: "puzzlepiece.extension")
             }
-            .menuStyle(.borderlessButton)
+            // A borderless menu tints its label with the accent color and has no hover of its own; this one
+            // looks and responds like the toolbar's other buttons.
+            .menuStyle(.button)
             .menuIndicator(.hidden)
+            .buttonStyle(ChromeIconButtonStyle(size: 30))
             .fixedSize()
-            .frame(width: 30, height: 30)
             .help("Extensions")
         }
     }

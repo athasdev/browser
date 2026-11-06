@@ -24,7 +24,7 @@ struct DownloadsButton: View {
             }
             .frame(width: 17, height: 17)
         }
-        .buttonStyle(ChromeIconButtonStyle(size: 34))
+        .buttonStyle(ChromeIconButtonStyle(size: 30))
         .help("Downloads")
         .accessibilityLabel("Downloads")
         .accessibilityValue(downloads.isDownloading ? Text(downloads.progress, format: .percent.precision(.fractionLength(0)))
