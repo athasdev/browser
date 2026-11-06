@@ -126,6 +126,9 @@ final class FaviconTests: XCTestCase {
         XCTAssertEqual(cache.entry(forHost: "example.com"), entry)
         XCTAssertEqual(cache.entry(forHost: "example.com", now: .now.addingTimeInterval(6 * 24 * 60 * 60)), entry)
         XCTAssertNil(cache.entry(forHost: "example.com", now: .now.addingTimeInterval(8 * 24 * 60 * 60)))
+        // A restored tab still shows an old icon while the page's own one loads.
+        XCTAssertEqual(cache.entry(forHost: "example.com", now: .now.addingTimeInterval(8 * 24 * 60 * 60),
+                                   allowingStale: true), entry)
         XCTAssertNil(cache.entry(forHost: "example.org"))
     }
 

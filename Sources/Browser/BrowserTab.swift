@@ -81,6 +81,7 @@ final class BrowserTab: Identifiable {
         suspendedState = interactionState
         favicon = FaviconStore.cachedIcon(for: url)
         faviconHost = url?.host()
+        if favicon == nil { loadStoredFavicon(for: url) }
         // The page is already in history, so loading it again on restore isn't another visit.
         historyVisit = url.map { (nil, $0) }
         pageDelegate.tab = self
@@ -481,6 +482,20 @@ final class BrowserTab: Identifiable {
     }
 
     /// Reads the icon from the loaded page, showing the host's last known icon until then.
+    /// Shows the icon saved for the site while the page's own icon loads or the tab sleeps. A sleeping
+    /// tab whose site has no saved icon fetches it the way a bookmark does, except in a private window.
+    private func loadStoredFavicon(for url: URL?) {
+        guard let url, let host = url.host(), url.scheme == "http" || url.scheme == "https" else { return }
+        Task { [weak self] in
+            var icon = await FaviconStore.storedIcon(for: url)
+            if icon == nil, let self, self.isSuspended, !(self.browser?.isPrivate ?? false) {
+                icon = await FaviconStore.icon(for: url)
+            }
+            guard let icon, let self, self.favicon == nil, self.faviconHost == host else { return }
+            self.favicon = icon
+        }
+    }
+
     private func updateFavicon() {
         faviconTask?.cancel()
         guard let url, let host = url.host(), url.scheme == "http" || url.scheme == "https" else {
@@ -491,6 +506,7 @@ final class BrowserTab: Identifiable {
         if faviconHost != host {
             faviconHost = host
             favicon = FaviconStore.cachedIcon(for: url)
+            if favicon == nil { loadStoredFavicon(for: url) }
         }
         faviconTask = Task { [weak self] in
             // Pages often set their icon from script just after loading or changing their URL.

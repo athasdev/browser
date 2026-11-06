@@ -104,10 +104,12 @@ struct FaviconCache: Sendable {
     let directory: URL
     var maxAge: Duration = .seconds(7 * 24 * 60 * 60)
 
-    func entry(forHost host: String, now: Date = .now) -> Entry? {
+    /// The saved icon for a host. Past `maxAge` it's only returned with `allowingStale`, for showing an icon
+    /// right away while a fresh one loads; an old icon beats none.
+    func entry(forHost host: String, now: Date = .now, allowingStale: Bool = false) -> Entry? {
         let file = fileURL(forHost: host)
         guard let modified = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date,
-              now.timeIntervalSince(modified) < TimeInterval(maxAge.components.seconds),
+              allowingStale || now.timeIntervalSince(modified) < TimeInterval(maxAge.components.seconds),
               let data = try? Data(contentsOf: file) else { return nil }
         return try? PropertyListDecoder().decode(Entry.self, from: data)
     }
@@ -171,6 +173,19 @@ enum FaviconStore {
 
     static func cachedIcon(for url: URL?) -> Image? {
         url?.host().flatMap { icons[$0]?.image }
+    }
+
+    /// The icon kept for a site, in memory or on disk, without touching the network, so restored and
+    /// suspended tabs show their icons as soon as the app opens. An old icon on disk still counts here;
+    /// loading the page replaces it.
+    static func storedIcon(for url: URL?) async -> Image? {
+        guard let host = url?.host() else { return nil }
+        if let icon = icons[host] { return icon.image }
+        guard let icon = await diskIcon(forHost: host, in: cache, allowingStale: true) else { return nil }
+        // Another load may have kept a fresher icon meanwhile.
+        if let current = icons[host] { return current.image }
+        icons[host] = icon
+        return icon.image
     }
 
     /// An icon for a site that isn't open, such as a bookmark: the cached one, the site's `/favicon.ico`,
@@ -250,8 +265,10 @@ enum FaviconStore {
     }
 
     @concurrent
-    nonisolated private static func diskIcon(forHost host: String, in cache: FaviconCache) async -> Icon? {
-        guard let entry = cache.entry(forHost: host), let image = image(from: entry.data) else { return nil }
+    nonisolated private static func diskIcon(forHost host: String, in cache: FaviconCache,
+                                             allowingStale: Bool = false) async -> Icon? {
+        guard let entry = cache.entry(forHost: host, allowingStale: allowingStale),
+              let image = image(from: entry.data) else { return nil }
         return Icon(source: entry.source, image: image)
     }
 
