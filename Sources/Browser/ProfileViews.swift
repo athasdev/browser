@@ -29,7 +29,7 @@ struct ProfileBadge: View {
     }
 }
 
-/// The profile badge in a window's toolbar, which opens windows in other profiles.
+/// The profile's name in a window's toolbar, as plain text, which opens windows in other profiles.
 struct ProfileMenu: View {
     let profiles: ProfileStore
     let current: BrowserProfile
@@ -57,11 +57,14 @@ struct ProfileMenu: View {
                 openSettings()
             }
         } label: {
-            ProfileBadge(profile: current, size: 20)
+            Text(current.displayName)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .menuStyle(.button)
         .menuIndicator(.hidden)
-        .buttonStyle(ChromeIconButtonStyle(size: 30))
+        .buttonStyle(.plain)
         .fixedSize()
         .help("\(current.displayName) Profile")
         .accessibilityLabel("Profile: \(current.displayName)")
